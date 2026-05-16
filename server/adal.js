@@ -103,18 +103,14 @@ function release() {
   if (next) { active++; next(); }
 }
 
-// ---- Per-call scratch cwd ------------------------------------------------
-// ADAL stores per-project session state. Two concurrent calls in the same
-// cwd can deadlock on settings.json.lock, so mint a unique dir per call
-// when the caller doesn't supply one.
-const SCRATCH_ROOT = path.join(os.tmpdir(), 'crucible-adal');
-fs.mkdirSync(SCRATCH_ROOT, { recursive: true });
-let scratchCounter = 0;
-function mintScratchCwd() {
-  const dir = path.join(SCRATCH_ROOT, `w${process.pid}-${++scratchCounter}`);
-  fs.mkdirSync(dir, { recursive: true });
-  return dir;
-}
+// ---- Stable inference cwd -----------------------------------------------
+// We learned the hard way that minting a fresh cwd per call doesn't unlock
+// parallelism (ADAL deadlocks on settings.json.lock regardless of cwd) and
+// makes every call slow (ADAL re-inits per-project state). Inference calls
+// without an explicit cwd share one stable dir so ADAL caches stay warm.
+// The forger passes its own project-specific cwd, which still works.
+const INFERENCE_CWD = path.join(os.tmpdir(), 'crucible-adal-inference');
+fs.mkdirSync(INFERENCE_CWD, { recursive: true });
 
 // ---- Core runner --------------------------------------------------------
 /**
@@ -133,7 +129,7 @@ async function runAdal(opts) {
 
   if (!(await checkAdal())) return { ok: false, error: 'adal_not_installed' };
 
-  const cwd = opts.cwd || mintScratchCwd();
+  const cwd = opts.cwd || INFERENCE_CWD;
   const model = opts.model || undefined;
   const allowedTools = Array.isArray(opts.allowedTools) ? opts.allowedTools : null;
   const timeoutMs = Number(opts.timeoutMs) || 120_000;
@@ -155,7 +151,16 @@ function spawnAdal({ prompt, model, cwd, allowedTools, timeoutMs }) {
     if (allowedTools && allowedTools.length) {
       args.push('--yolo', '--allowed-tools', allowedTools.join(','));
     }
-    const proc = spawn(ADAL_CMD, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+    // `detached: true` makes the child the leader of its own process
+    // group. On timeout we send SIGKILL to the whole group with
+    // process.kill(-pid, …) so the bun worker dies too — without this,
+    // SIGKILL on the wrapper leaves an orphaned worker that keeps holding
+    // ~/.adal/settings.json.lock and blocks every subsequent call.
+    const proc = spawn(ADAL_CMD, args, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    });
     let stdout = '', stderr = '';
     proc.stdout.on('data', d => stdout += d.toString());
     proc.stderr.on('data', d => stderr += d.toString());
@@ -163,7 +168,9 @@ function spawnAdal({ prompt, model, cwd, allowedTools, timeoutMs }) {
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
-      try { proc.kill('SIGKILL'); } catch (_) {}
+      try { process.kill(-proc.pid, 'SIGKILL'); } catch (_) {
+        try { proc.kill('SIGKILL'); } catch (_2) {}
+      }
     }, timeoutMs);
 
     proc.on('error', err => {
