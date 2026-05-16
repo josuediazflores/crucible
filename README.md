@@ -5,10 +5,18 @@ Automated AI evaluations for enterprise GitHub repos.
 Crucible connects to a GitHub account, walks the repos you select, finds every
 LLM callsite (OpenAI / Anthropic / OpenRouter / LangChain / etc.), reverse-
 engineers each one into an evaluation (prompt template, output schema, test
-cases), then runs it against a slate of cheaper challenger models via
-OpenRouter and uses **Claude Opus 4.7** as the judge. The output: for each
-callsite, the cheapest model that still passes — and the % you'll save by
-switching.
+cases), then runs it against a slate of cheaper challenger models via the
+**ADAL CLI** and uses **Claude Opus 4.7** (also via ADAL) as the judge. The
+output: for each callsite, the cheapest model that still passes — and the %
+you'll save by switching.
+
+> **Hackathon note:** Every LLM hop is now an `adal -q ...` subprocess call.
+> That means each call inherits ADAL's coding-agent identity prompt and its
+> tool catalog (we can't strip them in headless mode). The bias is constant
+> across challengers, so relative rankings — "which model is cheapest while
+> still passing the eval" — remain meaningful; absolute pass rates and the
+> savings % are an estimate, not a literal promise about a customer's prod
+> stack.
 
 ```
 Probing  →  Forging   →  Tempering  →  Tempered
@@ -29,40 +37,33 @@ npm start
 # open http://localhost:4317
 ```
 
+### Required: ADAL
+
+All LLM hops route through the ADAL CLI. Install it and log in once:
+
+```bash
+npm i -g @sylphai/adal-cli
+adal              # log in once, credentials get cached at ~/.adal/
+```
+
+Then verify: `adal -v` should print a version. Crucible's startup log will
+show `adal: /opt/homebrew/bin/adal (healthy)` if everything's wired up.
+
+If `adal` isn't on the PATH or isn't authenticated, Crucible falls back to a
+high-fidelity **demo simulation** that mirrors what the real pipeline would
+do — useful for screenshots and UX demos without burning credits.
+
 ### Optional keys
 
 | key                   | what it enables                                                  |
 | --------------------- | ---------------------------------------------------------------- |
-| `GITHUB_CLIENT_ID` + `GITHUB_CLIENT_SECRET` | Real GitHub OAuth — clone & scan your real repos.   |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Claude Opus 4.7 judge + Claude-driven prompt extraction. Uses your Claude **subscription** via the Agent SDK — no metered API tokens. |
-| `OPENROUTER_API_KEY`  | Actually run the challenger models (one key, many providers).    |
-| `ADAL_CMD` (path to `adal`) | Use ADAL CLI as the coding agent during Forging (preferred over the Agent SDK if installed). |
+| `GITHUB_CLIENT_ID` + `GITHUB_CLIENT_SECRET` | Real GitHub OAuth — clone & scan your real repos. |
+| `ADAL_CMD` (path to `adal`) | Override the `adal` binary path if it isn't on `$PATH`. |
+| `ADAL_CONCURRENCY` | Max simultaneous `adal -q` subprocess calls. Default `1`. Bump cautiously — ADAL serializes on a per-user settings lock and concurrent calls can deadlock. |
+| `JUDGE_MODEL` / `FORGER_MODEL` / `CHALLENGER_MODELS` | Override the default ADAL catalog keys (see `~/.adal/model_catalog.json`). |
 
-Without keys, the dashboard still works end-to-end — it falls back to a
-high-fidelity simulation that mirrors what the real pipeline would do, so you
-can demo the UX without burning credits.
-
-### Claude Agent SDK setup (OAuth — no Anthropic API charges)
-
-Crucible uses [`@anthropic-ai/claude-agent-sdk`](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk),
-which delegates inference to Claude Code under the hood. That means **you can
-authenticate against your Claude Pro/Max/Team/Enterprise subscription** instead
-of using a metered Anthropic API key.
-
-```bash
-# 1. Install Claude Code (only needs to be done once):
-npm i -g @anthropic-ai/claude-code
-
-# 2. Generate a long-lived (~1 year) OAuth token:
-claude setup-token
-#   Walks you through OAuth in a browser, then prints an sk-ant-oat01-... token.
-
-# 3. Paste it into .env:
-CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-…
-```
-
-That single token replaces the old `ANTHROPIC_API_KEY` requirement. (If you do
-set both, the SDK still prefers `CLAUDE_CODE_OAUTH_TOKEN`.)
+The legacy `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, and
+`OPENROUTER_API_KEY` env vars are no longer read — ADAL handles auth.
 
 ### GitHub OAuth setup
 
@@ -70,21 +71,6 @@ set both, the SDK still prefers `CLAUDE_CODE_OAUTH_TOKEN`.)
 2. Homepage URL: `http://localhost:4317`
 3. Authorization callback URL: `http://localhost:4317/api/github/callback`
 4. Copy the client ID / secret into `.env`.
-
-### ADAL setup (optional but cool)
-
-ADAL is the SylphAI coding agent. Install + log in once interactively, then
-Crucible will shell out to it headlessly.
-
-```bash
-npm i -g @sylphai/adal-cli
-adal              # log in once, credentials get cached
-# from now on Crucible can call:
-#   adal -q "<prompt>" -o json --yolo --allowed-tools "Read,Search"
-```
-
-If `adal` isn't on the PATH or `-v` fails, Crucible falls through to direct
-Anthropic SDK calls.
 
 ---
 

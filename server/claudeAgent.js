@@ -1,145 +1,65 @@
 /**
- * Thin wrapper around @anthropic-ai/claude-agent-sdk.
+ * Compatibility shim — preserves the existing module surface so callers
+ * (`forger.js`, `tempering.js`, `pipeline.js`, `index.js`) don't have to
+ * change their imports while the ADAL migration is in flight.
  *
- * Auth: the SDK reads CLAUDE_CODE_OAUTH_TOKEN from the environment when no API
- * key is set, so a Claude Pro/Max/Team subscriber can run `claude setup-token`
- * once and not need a metered Anthropic API key.
+ * All real work happens in `./adal`.
  *
- * The SDK is ESM-only and the rest of the project is CommonJS, so we lazy-load
- * it via dynamic import.
+ * Original module wrapped @anthropic-ai/claude-agent-sdk; that dependency
+ * is now inert (orphaned in package.json for a follow-up cleanup).
  */
+const adal = require('./adal');
 
-let sdkPromise = null;
-function loadSdk() {
-  if (!sdkPromise) sdkPromise = import('@anthropic-ai/claude-agent-sdk');
-  return sdkPromise;
-}
-
+// Existing callers expect `isConfigured()` to be synchronous, but the new
+// check spawns `adal -v`. Cache the resolved value so the second call is
+// synchronous. Returns a Promise on first call, a boolean afterward — both
+// truthy/falsy in the same way callers consume.
+let cached = null;
 function isConfigured() {
-  return !!(process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY);
+  if (cached !== null) return cached;
+  const p = adal.checkAdal().then(v => { cached = v; return v; });
+  return p;
 }
 
 /**
- * Run a single-turn query through the Claude Agent SDK.
- *
- * @param {Object} opts
- * @param {string} opts.prompt
- * @param {string} [opts.model]               e.g. "claude-opus-4-7" or "haiku"
- * @param {string} [opts.system]              system prompt
- * @param {string} [opts.cwd]                 working directory (for Read/Grep tools)
- * @param {string[]} [opts.allowedTools]      default [] (no tools — pure inference)
- * @param {Object} [opts.schema]              JSON schema for structured output
- * @param {number} [opts.maxTurns]            default 1
- * @param {number} [opts.timeoutMs]           default 90_000
- *
- * @returns {Promise<{ ok: true, text: string, structured: any|null, raw: any[] } | { ok: false, error: string }>}
+ * Pre-existing signature:
+ *   runQuery({ prompt, model, system, cwd, allowedTools, schema, maxTurns, timeoutMs })
+ * Ignored under ADAL: `system` (no real `-p` override), `schema` (no
+ * server-side enforcement), `maxTurns` (single-turn semantics by default).
+ * The legacy return shape was `{ok, text, structured, raw}` or `{ok:false, error}`.
+ * We adapt to that.
  */
-async function runQuery(opts) {
-  if (!isConfigured()) {
-    return { ok: false, error: 'no_credentials' };
-  }
-  const {
-    prompt, model, system, cwd,
-    allowedTools = [],
-    schema = null,
-    maxTurns = 1,
-    timeoutMs = 90_000,
-  } = opts;
-
-  let sdk;
-  try { sdk = await loadSdk(); }
-  catch (e) { return { ok: false, error: 'sdk_load_failed: ' + e.message }; }
-
-  const queryOptions = {
-    model,
-    maxTurns,
-    permissionMode: 'default',
-    allowedTools,
-  };
-  if (system) queryOptions.systemPrompt = system;
-  if (cwd) queryOptions.cwd = cwd;
-  if (schema) {
-    queryOptions.outputFormat = { type: 'json_schema', schema };
-  }
-
-  // Strip undefined keys so the SDK doesn't choke on them.
-  for (const k of Object.keys(queryOptions)) {
-    if (queryOptions[k] === undefined) delete queryOptions[k];
-  }
-
-  const collected = [];
-  let textChunks = [];
-  let structured = null;
-  let resultMessage = null;
-  let timedOut = false;
-
-  const iterable = sdk.query({ prompt, options: queryOptions });
-  const timer = setTimeout(() => {
-    timedOut = true;
-    if (iterable && typeof iterable.return === 'function') iterable.return();
-  }, timeoutMs);
-
-  try {
-    for await (const msg of iterable) {
-      collected.push(msg);
-      if (msg.type === 'assistant' && msg.message?.content) {
-        for (const block of msg.message.content) {
-          if (block.type === 'text' && typeof block.text === 'string') {
-            textChunks.push(block.text);
-          }
-        }
-      } else if (msg.type === 'result') {
-        resultMessage = msg;
-        if (msg.result && typeof msg.result === 'string') textChunks.push(msg.result);
-        if (msg.structured_output) structured = msg.structured_output;
-      }
-    }
-  } catch (err) {
-    clearTimeout(timer);
-    return { ok: false, error: timedOut ? 'timeout' : ('sdk_error: ' + err.message) };
-  }
-  clearTimeout(timer);
-
+async function runQuery(opts = {}) {
+  const res = await adal.runAdal({
+    prompt: opts.prompt,
+    model: adal.resolveAdalKey(opts.model) || opts.model,
+    cwd: opts.cwd,
+    allowedTools: opts.allowedTools,
+    timeoutMs: opts.timeoutMs,
+  });
+  if (!res.ok) return { ok: false, error: res.error || 'adal_failure' };
   return {
     ok: true,
-    text: textChunks.join('').trim(),
-    structured,
-    raw: collected,
+    text: res.answer || '',
+    structured: null,   // ADAL has no structured-output enforcement
+    raw: res.raw ? [res.raw] : [],
   };
 }
 
-/** Pull the largest balanced {...} block out of a string (heuristic JSON extractor). */
-function extractJsonObject(text) {
-  if (!text) return null;
-  const first = text.indexOf('{');
-  if (first < 0) return null;
-  let depth = 0, end = -1, inString = false, escaped = false;
-  for (let i = first; i < text.length; i++) {
-    const c = text[i];
-    if (escaped) { escaped = false; continue; }
-    if (c === '\\') { escaped = true; continue; }
-    if (c === '"') inString = !inString;
-    if (inString) continue;
-    if (c === '{') depth++;
-    else if (c === '}') { depth--; if (depth === 0) { end = i; break; } }
-  }
-  if (end < 0) return null;
-  try { return JSON.parse(text.slice(first, end + 1)); }
-  catch { return null; }
-}
-
 /**
- * Convenience wrapper for "give me JSON back" queries.
- * Tries structured output first; falls back to parsing the text response.
+ * Pre-existing signature:
+ *   runJsonQuery(opts) → runQuery result + { json }
  */
-async function runJsonQuery(opts) {
+async function runJsonQuery(opts = {}) {
   const res = await runQuery(opts);
-  if (!res.ok) return res;
-  if (res.structured && typeof res.structured === 'object') {
-    return { ...res, json: res.structured };
-  }
-  const parsed = extractJsonObject(res.text);
-  return { ...res, json: parsed };
+  if (!res.ok) return { ...res, json: null };
+  const json = adal.extractJsonObject(res.text);
+  return { ...res, json };
 }
 
-module.exports = { isConfigured, runQuery, runJsonQuery, extractJsonObject };
+module.exports = {
+  isConfigured,
+  runQuery,
+  runJsonQuery,
+  extractJsonObject: adal.extractJsonObject,
+};

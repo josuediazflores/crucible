@@ -2,67 +2,22 @@
  * Forging stage — for each detected callsite, build an "evaluation":
  *   { prompt template, output format/schema, 20-50 test cases, metric }.
  *
- * Strategy, in order:
- *   1. If ADAL_CMD is configured AND adal is installed, shell out to ADAL
- *      with a focused prompt + repo path + callsite location.
- *   2. Else if the Claude Agent SDK is set up (CLAUDE_CODE_OAUTH_TOKEN, or
- *      ANTHROPIC_API_KEY as a fallback), call Claude with Read/Grep tools
- *      scoped to the cloned repo and a JSON-schema-validated response.
- *   3. Else: synthesize plausible test cases from the callsite snippet alone.
+ * Strategy:
+ *   1. If ADAL is installed, shell out to it (via ./adal helpers) with
+ *      Read/Search tools scoped to the cloned repo so the agent can read
+ *      surrounding files and infer the prompt template.
+ *   2. Else: synthesize plausible test cases from the callsite snippet alone.
  */
-const { spawn } = require('child_process');
-const crypto = require('crypto');
 const path = require('path');
 const db = require('./db');
 const { projectWorkDir } = require('./scanner');
-const claudeAgent = require('./claudeAgent');
+const { checkAdal, runAdalJson, extractJsonObject } = require('./adal');
 
-const ADAL_CMD = process.env.ADAL_CMD || 'adal';
-const JUDGE_MODEL = process.env.JUDGE_MODEL || 'claude-opus-4-7';
-const FORGER_MODEL = process.env.FORGER_MODEL || 'claude-sonnet-4-6';
+const JUDGE_MODEL = process.env.JUDGE_MODEL || 'anthropic-claude-opus-4-7';
+const FORGER_MODEL = process.env.FORGER_MODEL || 'anthropic-claude-sonnet-4-6';
 const CHALLENGER_LIST = (process.env.CHALLENGER_MODELS ||
-  'anthropic/claude-haiku-4-5,openai/gpt-4o-mini,google/gemini-2.0-flash-001,meta-llama/llama-3.1-8b-instruct,mistralai/mistral-small'
+  'zai-glm-4.7-flashx,anthropic-claude-haiku-4-5-20251001,google-gemini-3-flash-preview,openai-gpt-5-mini'
 ).split(',').map(s => s.trim()).filter(Boolean);
-
-let adalAvailable = null;
-function checkAdal() {
-  if (adalAvailable !== null) return adalAvailable;
-  return new Promise(resolve => {
-    const p = spawn(ADAL_CMD, ['-v'], { stdio: 'ignore' });
-    p.on('error', () => { adalAvailable = false; resolve(false); });
-    p.on('close', code => { adalAvailable = code === 0; resolve(adalAvailable); });
-  });
-}
-
-function runAdal(prompt, opts = {}) {
-  return new Promise((resolve, reject) => {
-    const args = [
-      '-q', prompt,
-      '-o', 'json',
-      '--yolo',
-      '--allowed-tools', 'Read,Search'
-    ];
-    const env = { ...process.env, ...(opts.env || {}) };
-    const proc = spawn(ADAL_CMD, args, { cwd: opts.cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '', stderr = '';
-    proc.stdout.on('data', d => stdout += d.toString());
-    proc.stderr.on('data', d => stderr += d.toString());
-    const timer = setTimeout(() => { proc.kill('SIGKILL'); reject(new Error('adal timeout')); }, opts.timeout || 90_000);
-    proc.on('error', err => { clearTimeout(timer); reject(err); });
-    proc.on('close', code => {
-      clearTimeout(timer);
-      if (code !== 0) return reject(new Error(`adal exit ${code}: ${stderr.slice(-400)}`));
-      try {
-        const parsed = JSON.parse(stdout);
-        resolve(parsed.answer || parsed);
-      } catch (e) {
-        resolve(stdout.trim());   // best-effort
-      }
-    });
-  });
-}
-
-const { extractJsonObject } = claudeAgent;
 
 const FORGE_SCHEMA = {
   type: 'object',
@@ -126,40 +81,28 @@ async function extractEvalSpec(project, callsite) {
   const model = callsite.model || 'unknown';
   const prompt = FORGE_PROMPT(rel, line, snippet, model);
 
-  // 1) Try ADAL (hackathon sponsor, in-repo agent)
+  // 1) Try ADAL with Read/Search tools scoped to the cloned repo.
   if (await checkAdal()) {
     try {
       const cwd = projectWorkDir(project.id);
-      const answer = await runAdal(prompt, { cwd });
-      const obj = extractJsonObject(typeof answer === 'string' ? answer : JSON.stringify(answer));
-      if (obj && Array.isArray(obj.test_cases) && obj.test_cases.length) return obj;
-    } catch (err) {
-      console.error('[forger] adal failed, falling through:', err.message);
-    }
-  }
-  // 2) Claude Agent SDK (uses Claude Pro/Max subscription via OAuth)
-  if (claudeAgent.isConfigured()) {
-    try {
-      const cwd = projectWorkDir(project.id);
       const haveRepo = cwd && require('fs').existsSync(cwd);
-      const res = await claudeAgent.runJsonQuery({
+      const res = await runAdalJson({
         prompt,
         model: FORGER_MODEL,
         cwd: haveRepo ? cwd : undefined,
-        allowedTools: haveRepo ? ['Read', 'Grep', 'Glob'] : [],
-        schema: FORGE_SCHEMA,
-        maxTurns: haveRepo ? 4 : 1,
-        timeoutMs: 90_000,
+        allowedTools: haveRepo ? ['Read', 'Search'] : null,
+        timeoutMs: 120_000,
       });
       if (res.ok && res.json && Array.isArray(res.json.test_cases) && res.json.test_cases.length) {
         return res.json;
       }
-      if (!res.ok) console.error('[forger] claude-agent-sdk:', res.error);
+      if (!res.ok) console.error('[forger] adal:', res.error);
+      else console.error('[forger] adal returned no parseable test_cases');
     } catch (err) {
-      console.error('[forger] claude-agent-sdk threw:', err.message);
+      console.error('[forger] adal threw:', err.message);
     }
   }
-  // 3) Heuristic fallback
+  // 2) Heuristic fallback — synthesize plausible test cases from the snippet.
   return synthesizeFallback(callsite);
 }
 

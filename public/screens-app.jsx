@@ -46,7 +46,7 @@ function Dashboard({ user, projects, onOpen, onAddRepo, meta }) {
           { k: "REPOS UNDER FORGE", v: projects.length, sub: `${active} active`, em: false },
           { k: "EVALUATIONS BUILT", v: allEvalsWinners, sub: "across all repos", em: false },
           { k: "AVG SAVINGS",       v: "—", sub: "cheapest passing model", em: true },
-          { k: "MODELS BENCHED",    v: meta?.challengers?.length || 5, sub: `via OpenRouter`, em: false }
+          { k: "MODELS BENCHED",    v: meta?.challengers?.length || 5, sub: `via AdaL`, em: false }
         ].map((s, i) => (
           <div key={s.k} style={{
             padding: "22px 28px",

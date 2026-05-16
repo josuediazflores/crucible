@@ -14,7 +14,7 @@ const { cloneRepo, scanRepoFiles, logScanEvent } = require('./scanner');
 const { forgeEvaluationsForProject } = require('./forger');
 const { temperProject } = require('./tempering');
 const { getAccount } = require('./github');
-const claudeAgent = require('./claudeAgent');
+const { checkAdal } = require('./adal');
 
 const inFlight = new Set();   // project ids currently being processed
 
@@ -131,9 +131,9 @@ async function runForging(project) {
     touch(project.id, { stage: 2, progress: 0, status_text: 'No callsites found — skipping.' });
     return;
   }
-  // Demo: synthesize evaluations without LLM if no Claude Agent SDK / Anthropic auth.
-  const hasClaude = claudeAgent.isConfigured();
-  if (!hasClaude) {
+  // Demo: synthesize evaluations without LLM if ADAL isn't installed.
+  const hasAdal = await checkAdal();
+  if (!hasAdal) {
     const { challengersFor } = (() => {
       const list = (process.env.CHALLENGER_MODELS ||
         'anthropic/claude-haiku-4-5,openai/gpt-4o-mini,google/gemini-2.0-flash-001,meta-llama/llama-3.1-8b-instruct,mistralai/mistral-small'
@@ -195,10 +195,9 @@ async function runTempering(project) {
     touch(project.id, { stage: 3, progress: 1, status_text: 'Tempered — no work.' });
     return;
   }
-  // Demo path when no OpenRouter + no Claude Agent SDK
-  const hasOR = !!process.env.OPENROUTER_API_KEY;
-  const hasClaude = claudeAgent.isConfigured();
-  if (!hasOR && !hasClaude) {
+  // Demo path when ADAL isn't installed.
+  const hasAdal = await checkAdal();
+  if (!hasAdal) {
     for (let i = 0; i < evals.length; i++) {
       const e = evals[i];
       // Pretend it ran by setting fake winner / pass rate / savings.

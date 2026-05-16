@@ -1,6 +1,7 @@
 /**
  * Tempering — run each test case against the current model AND each challenger
- * via OpenRouter, then use Claude Opus as the judge to compare outputs.
+ * via the ADAL CLI, then use Claude Opus (also via ADAL) as the judge to
+ * compare outputs.
  *
  * Final scoring:
  *   - per (eval, challenger) pass rate
@@ -8,11 +9,9 @@
  *   - savings_pct = (current_cost - winner_cost) / current_cost
  */
 const db = require('./db');
-const claudeAgent = require('./claudeAgent');
+const { runAdal, runAdalJson, resolveAdalKey } = require('./adal');
 
-const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || '';
-const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const JUDGE_MODEL = process.env.JUDGE_MODEL || 'claude-opus-4-7';
+const JUDGE_MODEL = process.env.JUDGE_MODEL || 'anthropic-claude-opus-4-7';
 const QUALITY_BAR = Number(process.env.QUALITY_BAR || 80);   // % pass needed to be a viable winner
 
 // Cents per 1M tokens (rough, public list — kept here for *relative* savings math).
@@ -31,13 +30,15 @@ const MODEL_PRICING = {
   'text-embedding-3-large':       { in: 0.13,  out: 0 },
   'text-embedding-3-small':       { in: 0.02,  out: 0 },
   'gemini-1.5-pro':               { in: 1.25,  out: 5.00 },
-  // Challengers (OpenRouter slugs)
-  'anthropic/claude-haiku-4-5':           { in: 1.00,  out: 5.00 },
-  'openai/gpt-4o-mini':                   { in: 0.15,  out: 0.60 },
-  'google/gemini-2.0-flash-001':          { in: 0.10,  out: 0.40 },
-  'meta-llama/llama-3.1-8b-instruct':     { in: 0.06,  out: 0.06 },
-  'mistralai/mistral-small':              { in: 0.20,  out: 0.60 },
-  'cohere/command-r':                     { in: 0.50,  out: 1.50 },
+  // Challengers (ADAL catalog keys)
+  'zai-glm-4.7-flashx':                       { in: 0.10,  out: 0.30 },
+  'anthropic-claude-haiku-4-5-20251001':      { in: 1.00,  out: 5.00 },
+  'google-gemini-3-flash-preview':            { in: 0.10,  out: 0.40 },
+  'openai-gpt-5-mini':                        { in: 0.15,  out: 0.60 },
+  'anthropic-claude-sonnet-4-6':              { in: 3.00,  out: 15.00 },
+  'anthropic-claude-opus-4-7':                { in: 15.00, out: 75.00 },
+  'anthropic-claude-opus-4-6':                { in: 10.00, out: 50.00 },
+  'google-gemini-3.1-pro-preview':            { in: 1.25,  out: 5.00 },
 };
 
 function pricingFor(model) {
@@ -72,83 +73,53 @@ function buildMessages(evaluation, testCase) {
   return [{ role: 'user', content: prompt }];
 }
 
-async function callOpenRouter(model, messages) {
-  if (!OPENROUTER_KEY) throw new Error('OPENROUTER_API_KEY not set');
+// Flatten chat messages into a single string for `adal -q`. ADAL doesn't
+// take a structured messages array; the model sees the rendered text.
+function flatten(messages) {
+  return messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
+}
+
+// Run one challenger model via ADAL. Returns the shape the rest of the
+// pipeline expects: {output, latency_ms, tokens_in, tokens_out}.
+async function callAdalChallenger(model, messages) {
   const t0 = Date.now();
-  const res = await fetch(OPENROUTER_URL, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${OPENROUTER_KEY}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://crucible.local',
-      'X-Title': 'Crucible'
-    },
-    body: JSON.stringify({
-      model, messages,
-      max_tokens: 512, temperature: 0.2
-    })
+  const prompt = flatten(messages);
+  const res = await runAdal({
+    prompt,
+    model,                       // already an ADAL catalog key (CHALLENGER_MODELS)
+    timeoutMs: 90_000,
   });
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`openrouter ${model} ${res.status}: ${txt.slice(0, 200)}`);
-  }
-  const body = await res.json();
-  const text = body.choices?.[0]?.message?.content || '';
-  const usage = body.usage || {};
+  const output = res.ok ? res.answer : `[error] ${res.error}`;
   return {
-    output: text,
+    output,
     latency_ms: Date.now() - t0,
-    tokens_in: usage.prompt_tokens || approxTokens(JSON.stringify(messages)),
-    tokens_out: usage.completion_tokens || approxTokens(text),
+    tokens_in: approxTokens(prompt),
+    tokens_out: approxTokens(output),
   };
 }
 
+// Same plumbing for the "current" model — but the scanner-detected model
+// string (e.g. "gpt-4o") usually isn't an ADAL catalog key, so we resolve
+// it to the closest current-gen substitute.
 async function callCurrentModel(model, messages) {
-  // If OpenRouter is configured, route everything through it — fewer keys to manage.
-  if (OPENROUTER_KEY) {
-    const slug = openRouterSlugForCurrent(model);
-    return callOpenRouter(slug, messages);
-  }
-  // Otherwise, if the Claude Agent SDK is set up and the current model is a Claude one,
-  // use it. This taps the user's Claude subscription via CLAUDE_CODE_OAUTH_TOKEN.
-  if (claudeAgent.isConfigured() && /claude/i.test(model)) {
-    const t0 = Date.now();
-    const promptText = messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n');
-    const res = await claudeAgent.runQuery({
-      prompt: promptText,
-      model,
-      allowedTools: [],
-      maxTurns: 1,
-      timeoutMs: 30_000,
-    });
-    const text = res.ok ? res.text : `[error] ${res.error}`;
+  const t0 = Date.now();
+  const prompt = flatten(messages);
+  const adalKey = resolveAdalKey(model);
+  if (!adalKey) {
+    // Embedding callsites and other unmappable models — short-circuit.
     return {
-      output: text,
-      latency_ms: Date.now() - t0,
-      tokens_in: approxTokens(promptText),
-      tokens_out: approxTokens(text),
+      output: `[skipped] no ADAL equivalent for "${model}"`,
+      latency_ms: 0, tokens_in: 0, tokens_out: 0,
     };
   }
-  // No keys — return a stub so the pipeline still flows in demo mode.
+  const res = await runAdal({ prompt, model: adalKey, timeoutMs: 60_000 });
+  const output = res.ok ? res.answer : `[error] ${res.error}`;
   return {
-    output: `[demo] No API key set; simulated answer for ${model}.`,
-    latency_ms: 50, tokens_in: 0, tokens_out: 16,
+    output,
+    latency_ms: Date.now() - t0,
+    tokens_in: approxTokens(prompt),
+    tokens_out: approxTokens(output),
   };
-}
-
-function openRouterSlugForCurrent(model) {
-  // map common bare model names to OpenRouter slugs
-  const m = (model || '').toLowerCase();
-  if (m.includes('gpt-4o-mini'))  return 'openai/gpt-4o-mini';
-  if (m.includes('gpt-4o'))       return 'openai/gpt-4o';
-  if (m.includes('gpt-4'))        return 'openai/gpt-4';
-  if (m.includes('gpt-3.5'))      return 'openai/gpt-3.5-turbo';
-  if (m.includes('claude-3-5-sonnet') || m.includes('claude-sonnet')) return 'anthropic/claude-3.5-sonnet';
-  if (m.includes('claude-3-opus') || m.includes('claude-opus'))       return 'anthropic/claude-3-opus';
-  if (m.includes('claude-3-haiku') || m.includes('haiku'))            return 'anthropic/claude-haiku-4-5';
-  if (m.includes('gemini'))       return 'google/gemini-2.0-flash-001';
-  if (m.includes('embedding'))    return 'openai/text-embedding-3-small';
-  return model;
 }
 
 const JUDGE_PROMPT = (eva, input, golden, current, challenger) => `You are an evaluator deciding whether a CHALLENGER LLM's answer is at least as good as the CURRENT model's answer for the same task.
@@ -187,28 +158,26 @@ const JUDGE_SCHEMA = {
 };
 
 async function judgePair(eva, input, golden, currentOut, challengerOut) {
-  if (!claudeAgent.isConfigured()) {
-    // Demo judge: simple string-similarity heuristic.
-    const sim = jaccard(currentOut, challengerOut);
-    return { pass: sim > 0.35, reason: `demo-judge similarity=${sim.toFixed(2)}` };
-  }
   try {
-    const res = await claudeAgent.runJsonQuery({
+    const res = await runAdalJson({
       prompt: JUDGE_PROMPT(eva, input, golden, currentOut, challengerOut),
       model: JUDGE_MODEL,
-      allowedTools: [],
-      schema: JUDGE_SCHEMA,
-      maxTurns: 1,
       timeoutMs: 45_000,
     });
     if (res.ok && res.json && typeof res.json.pass === 'boolean') {
       return { pass: res.json.pass, reason: String(res.json.reason || '').slice(0, 200) };
     }
-    if (!res.ok) console.error('[judge] sdk:', res.error);
+    if (!res.ok) console.error('[judge] adal:', res.error);
+    else console.error('[judge] unparseable answer');
   } catch (err) {
     console.error('[judge] threw:', err.message);
   }
-  return { pass: jaccard(currentOut, challengerOut) > 0.35, reason: 'judge-fallback' };
+  // Defensive default: when the judge fails, do NOT silently pass the challenger.
+  // Use string similarity as a transparent fallback so the run still completes.
+  return {
+    pass: jaccard(currentOut, challengerOut) > 0.35,
+    reason: 'judge_unparseable_fallback',
+  };
 }
 
 function jaccard(a, b) {
@@ -268,7 +237,7 @@ async function runEvaluation(evaluation, onTick) {
     for (const ch of challengers) {
       let out = '', lat = 0, tIn = 0, tOut = 0;
       try {
-        const r = await callOpenRouter(ch, messages);
+        const r = await callAdalChallenger(ch, messages);
         out = r.output; lat = r.latency_ms; tIn = r.tokens_in; tOut = r.tokens_out;
       } catch (err) {
         out = ''; lat = 0; tIn = 0; tOut = 0;

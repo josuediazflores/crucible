@@ -10,7 +10,7 @@ const {
 } = require('./auth');
 const gh = require('./github');
 const pipeline = require('./pipeline');
-const claudeAgent = require('./claudeAgent');
+const { checkAdal, MAX_CONCURRENCY } = require('./adal');
 
 const app = express();
 app.use(express.json({ limit: '256kb' }));
@@ -18,17 +18,17 @@ app.use(cookieParser());
 app.use(attachUser);
 
 // ---- API: meta ------------------------------------------------------------
-app.get('/api/meta', (req, res) => {
+app.get('/api/meta', async (req, res) => {
+  const has_adal = await checkAdal();
   res.json({
     ok: true,
     user: req.user || null,
     github_configured: gh.isConfigured(),
-    has_claude_agent: claudeAgent.isConfigured(),
-    claude_agent_auth: process.env.CLAUDE_CODE_OAUTH_TOKEN ? 'oauth' : (process.env.ANTHROPIC_API_KEY ? 'api_key' : 'none'),
-    has_openrouter: !!process.env.OPENROUTER_API_KEY,
+    has_adal,
     adal_cmd: process.env.ADAL_CMD || 'adal',
+    adal_concurrency: MAX_CONCURRENCY,
     challengers: (process.env.CHALLENGER_MODELS ||
-      'anthropic/claude-haiku-4-5,openai/gpt-4o-mini,google/gemini-2.0-flash-001,meta-llama/llama-3.1-8b-instruct,mistralai/mistral-small').split(',').map(s => s.trim())
+      'zai-glm-4.7-flashx,anthropic-claude-haiku-4-5-20251001,google-gemini-3-flash-preview,openai-gpt-5-mini').split(',').map(s => s.trim()),
   });
 });
 
@@ -212,14 +212,11 @@ app.get('*', (_req, res) => {
 });
 
 const PORT = Number(process.env.PORT) || 4317;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`\n  🔥  Crucible running at http://localhost:${PORT}\n`);
   console.log(`     github oauth:  ${gh.isConfigured() ? 'configured' : 'NOT configured (demo flow available)'}`);
-  const claudeAuth = process.env.CLAUDE_CODE_OAUTH_TOKEN ? 'OAuth (subscription)'
-                  : process.env.ANTHROPIC_API_KEY ? 'API key (metered)'
-                  : 'missing — judge/forger will use demo mode';
-  console.log(`     claude:        ${claudeAuth}`);
-  console.log(`     openrouter:    ${process.env.OPENROUTER_API_KEY ? 'configured' : 'missing — challengers will be simulated'}`);
-  console.log(`     adal:          ${process.env.ADAL_CMD || 'adal'}`);
+  const adalOK = await checkAdal();
+  console.log(`     adal:          ${process.env.ADAL_CMD || 'adal'} ${adalOK ? '(healthy)' : '(NOT installed — pipeline will run in demo mode)'}`);
+  console.log(`     concurrency:   ${MAX_CONCURRENCY}`);
   pipeline.start();
 });
