@@ -1,0 +1,18 @@
+**Base**
+- Paper: `#F5F1E8` (your off-white)
+- Paper Sunken: `#EDE7D8` (slightly darker, for cards/sections within the page)
+
+**Ink**
+- Ink: `#0F0E0C` (near-black with a warm undertone — pure #000 fights the warm paper)
+- Ink Muted: `#4A4742` (secondary text, warm gray)
+- Ink Faint: `#8A857C` (tertiary text, hairlines, borders)
+
+**Accent — Ember**
+- Ember: `#DC4A1F` (primary accent — molten, confident, on-brand)
+- Ember Deep: `#A8351A` (hover/pressed states, deeper for emphasis)
+- Ember Tint: `#F4D3C0` (very light, for accent backgrounds or highlighted cells)
+
+**Signal states (if/when you need them)**
+- Pass: `#4A6B3F` (sage green — earthy, fits the warm base, doesn't pop too hard)
+- Fail: `#8B2A1A` (deep oxblood — sits below the ember so they read as different signals)
+- Warn: `#C99332` (amber gold — harmonizes with ember but distinct)
