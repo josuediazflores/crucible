@@ -1,0 +1,225 @@
+/* ============ Crucible — Design tokens ============ */
+:root {
+  --paper: #F5F1E8;
+  --paper-sunken: #EDE7D8;
+  --paper-deep: #E4DCC8;
+  --ink: #0F0E0C;
+  --ink-muted: #4A4742;
+  --ink-faint: #8A857C;
+  --hairline: #D8CFB8;
+  --ember: #DC4A1F;
+  --ember-deep: #A8351A;
+  --ember-tint: #F4D3C0;
+  --pass: #4A6B3F;
+  --fail: #8B2A1A;
+  --warn: #C99332;
+
+  --font-display: "Unbounded", system-ui, sans-serif;
+  --font-body: "DM Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  font-family: var(--font-body);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+input, textarea { font-family: inherit; color: inherit; }
+a { color: inherit; }
+
+/* ============ Type ============ */
+.display { font-family: var(--font-display); font-weight: 900; letter-spacing: -0.03em; line-height: 0.95; }
+.mono { font-family: var(--font-mono); }
+.eyebrow {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 11px;
+  color: var(--ink-faint);
+}
+
+/* ============ Buttons ============ */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 20px;
+  border-radius: 2px;
+  font-weight: 500;
+  font-size: 14px;
+  letter-spacing: -0.005em;
+  transition: background 0.12s ease, color 0.12s ease, transform 0.06s ease;
+  white-space: nowrap;
+}
+.btn:active { transform: translateY(1px); }
+.btn-primary { background: var(--ember); color: var(--paper); }
+.btn-primary:hover { background: var(--ember-deep); }
+.btn-primary:disabled { background: var(--paper-deep); color: var(--ink-faint); cursor: not-allowed; }
+.btn-ghost { color: var(--ink); border: 1px solid var(--hairline); }
+.btn-ghost:hover { border-color: var(--ink); }
+.btn-dark { background: var(--ink); color: var(--paper); }
+.btn-dark:hover { background: #2a2825; }
+.btn-quiet { color: var(--ink-muted); padding: 8px 12px; }
+.btn-quiet:hover { color: var(--ink); }
+
+/* ============ Inputs ============ */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label { font-size: 12px; color: var(--ink-muted); font-weight: 500; }
+.input {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--hairline);
+  padding: 10px 0;
+  font-size: 16px;
+  color: var(--ink);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+.input:focus { border-color: var(--ink); }
+.input::placeholder { color: var(--ink-faint); }
+
+/* ============ Card / hairline ============ */
+.card {
+  background: var(--paper-sunken);
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+}
+.hairline-t { border-top: 1px solid var(--hairline); }
+.hairline-b { border-bottom: 1px solid var(--hairline); }
+
+/* ============ Scrollbar ============ */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--hairline); border-radius: 0; }
+::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); }
+
+/* ============ Sidebar ============ */
+.sidebar {
+  width: 240px;
+  background: var(--paper);
+  border-right: 1px solid var(--hairline);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+.sidebar-section { padding: 0 16px; }
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 2px;
+  color: var(--ink-muted);
+  font-size: 13.5px;
+  cursor: pointer;
+  user-select: none;
+}
+.sidebar-link:hover { color: var(--ink); background: var(--paper-sunken); }
+.sidebar-link.active { color: var(--ink); background: var(--paper-sunken); font-weight: 500; }
+.sidebar-link.active::before {
+  content: ""; width: 3px; height: 16px; background: var(--ember); margin-left: -12px; margin-right: 9px; border-radius: 0;
+}
+.sidebar-link.active { padding-left: 0; }
+
+/* ============ Badge / chip ============ */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-radius: 2px;
+  background: var(--paper-deep);
+  color: var(--ink-muted);
+  border: 1px solid var(--hairline);
+}
+.chip.ember { background: var(--ember-tint); color: var(--ember-deep); border-color: transparent; }
+.chip.pass { background: rgba(74,107,63,0.12); color: var(--pass); border-color: transparent; }
+.chip.warn { background: rgba(201,147,50,0.16); color: #8a6420; border-color: transparent; }
+.chip.fail { background: rgba(139,42,26,0.12); color: var(--fail); border-color: transparent; }
+.chip-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+/* ============ Pulse / scanning ============ */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+.pulse-dot { animation: pulse-dot 1.2s ease-in-out infinite; }
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+.shimmer {
+  position: relative;
+  overflow: hidden;
+}
+.shimmer::after {
+  content: "";
+  position: absolute; top:0; left:0; bottom:0; width: 30%;
+  background: linear-gradient(90deg, transparent, rgba(220,74,31,0.18), transparent);
+  animation: shimmer 1.8s ease-in-out infinite;
+}
+
+@keyframes scanline {
+  0% { top: 0%; opacity: 0; }
+  10%, 90% { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+
+/* ============ Code blocks ============ */
+.code {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  background: var(--paper-sunken);
+  color: var(--ink);
+  padding: 14px 16px;
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  overflow: auto;
+  white-space: pre;
+  line-height: 1.55;
+}
+
+/* ============ Stage indicator ============ */
+.stage-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* ============ Marquee row for repo card sweeping ============ */
+.kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border: 1px solid var(--hairline);
+  border-radius: 2px;
+  background: var(--paper);
+  color: var(--ink-muted);
+}
+
+/* utility */
+.row { display: flex; align-items: center; }
+.col { display: flex; flex-direction: column; }
+.gap-2 { gap: 8px; } .gap-3 { gap: 12px; } .gap-4 { gap: 16px; } .gap-6 { gap: 24px; } .gap-8 { gap: 32px; }
+.flex-1 { flex: 1; min-width: 0; }
+.muted { color: var(--ink-muted); }
+.faint { color: var(--ink-faint); }
