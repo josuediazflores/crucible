@@ -112,6 +112,27 @@ function release() {
 const INFERENCE_CWD = path.join(os.tmpdir(), 'crucible-adal-inference');
 fs.mkdirSync(INFERENCE_CWD, { recursive: true });
 
+// ---- Mid-flight cleanup -------------------------------------------------
+// Track every active child PID so we can take them down with us if the
+// server gets SIGTERM'd / SIGINT'd. Without this, `detached: true` (which
+// we need for the timeout-kill path) means children survive parent death
+// as orphans, keep holding the settings lock, and break the next startup.
+const activePids = new Set();
+let cleaningUp = false;
+function shutdownChildren() {
+  if (cleaningUp) return;
+  cleaningUp = true;
+  for (const pid of activePids) {
+    try { process.kill(-pid, 'SIGKILL'); } catch (_) {
+      try { process.kill(pid, 'SIGKILL'); } catch (_2) {}
+    }
+  }
+  activePids.clear();
+}
+process.on('SIGTERM', () => { shutdownChildren(); process.exit(0); });
+process.on('SIGINT',  () => { shutdownChildren(); process.exit(0); });
+process.on('exit', shutdownChildren);
+
 // ---- Core runner --------------------------------------------------------
 /**
  * @param {Object} opts
@@ -161,6 +182,7 @@ function spawnAdal({ prompt, model, cwd, allowedTools, timeoutMs }) {
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });
+    activePids.add(proc.pid);
     let stdout = '', stderr = '';
     proc.stdout.on('data', d => stdout += d.toString());
     proc.stderr.on('data', d => stderr += d.toString());
@@ -175,10 +197,12 @@ function spawnAdal({ prompt, model, cwd, allowedTools, timeoutMs }) {
 
     proc.on('error', err => {
       clearTimeout(timer);
+      activePids.delete(proc.pid);
       resolve({ ok: false, error: 'spawn_error: ' + err.message });
     });
     proc.on('close', code => {
       clearTimeout(timer);
+      activePids.delete(proc.pid);
       if (timedOut) return resolve({ ok: false, error: 'timeout' });
       // ADAL prints JSON for both success and failure cases.
       try {
