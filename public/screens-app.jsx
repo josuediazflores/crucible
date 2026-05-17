@@ -969,6 +969,7 @@ function DoneStage({ project, evaluations, callsites, onOpenEval }) {
   const [monthly, setMonthly] = useS_d(1_000_000);
   const [qualityBar, setQualityBar] = useS_d(80);
   const [reportBusy, setReportBusy] = useS_d(false);
+  const [applyOpen, setApplyOpen] = useS_d(false);
 
   const rows = evals.map(e => ({ e, t: evalAtThreshold(e, qualityBar) }));
   const projectables = rows.filter(({ t }) => t.currentPerCall > 0);
@@ -1086,10 +1087,18 @@ function DoneStage({ project, evaluations, callsites, onOpenEval }) {
             <button className="btn btn-ghost" onClick={onDownloadReport} disabled={reportBusy}>
               {reportBusy ? 'Building report…' : 'Download report'}
             </button>
-            <button className="btn btn-primary">Apply recommendations<Icon name="arrow-right" size={14} /></button>
+            <button className="btn btn-primary" onClick={() => setApplyOpen(true)}>Apply recommendations<Icon name="arrow-right" size={14} /></button>
           </div>
         </div>
       </div>
+
+      {applyOpen && (
+        <ApplyRecsModal
+          rows={eligible}
+          callsites={callsites || []}
+          onClose={() => setApplyOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -1548,6 +1557,196 @@ function EvalDetail({ evalId, onBack }) {
             />
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+/* ----- Apply Recommendations modal -----
+   Pure presentation surface. We don't modify the user's source code or
+   open PRs. The modal renders per callsite diffs and clipboard helpers
+   so the user can apply changes manually. */
+
+// Strip the ADAL provider prefix from a catalog key so we render the
+// real model id the user would put in their actual SDK call.
+//   openai-gpt-5-mini                       -> gpt-5-mini
+//   anthropic-claude-haiku-4-5-20251001     -> claude-haiku-4-5-20251001
+//   zai-glm-4.7-flashx                       -> glm-4.7-flashx
+// Prefix set comes from the providers in ~/.adal/model_catalog.json,
+// already documented in MODEL_KEY_MAP comments in server/adal.js.
+function unprefixModelId(adalKey) {
+  if (!adalKey) return '';
+  const prefixes = ['openai-', 'anthropic-', 'google-', 'zai-', 'deepseek-', 'kimi-', 'minimax-', 'chatgpt_web-'];
+  for (const p of prefixes) {
+    if (adalKey.startsWith(p)) return adalKey.slice(p.length);
+  }
+  return adalKey;
+}
+
+// Classify a migration into 'same-sdk' | 'same-provider' | 'cross-vendor'.
+// langchain and openrouter abstract the vendor, so any model swap stays
+// within the same SDK. For everything else we compare the source
+// provider against the ADAL key prefix.
+function classifyMigration(currentProvider, winnerKey) {
+  const cp = (currentProvider || '').toLowerCase();
+  if (cp === 'langchain' || cp === 'openrouter') return 'same-sdk';
+  const winnerProvider = (winnerKey || '').split('-')[0].toLowerCase();
+  if (cp && winnerProvider === cp) return 'same-provider';
+  return 'cross-vendor';
+}
+
+function migrationNote(kind, currentProvider, winnerKey) {
+  const winnerProvider = (winnerKey || '').split('-')[0];
+  if (kind === 'same-provider') {
+    return `Drop in replacement within the same provider. Your existing ${currentProvider} SDK accepts the new model id directly. Re-run your test suite after switching.`;
+  }
+  if (kind === 'same-sdk') {
+    return `Your code uses ${currentProvider}, which routes any model id transparently. Just update the model string. No SDK changes required.`;
+  }
+  return `Cross vendor swap (${currentProvider} to ${winnerProvider}). In addition to the model id, you will need to swap the SDK client and adapt to response shape differences. The cost reduction is meaningful enough that the refactor usually pays off, but verify your prompt template still parses the new response format.`;
+}
+
+function buildDiff(currentModel, newModelId) {
+  return `- model: "${currentModel}"\n+ model: "${newModelId}"`;
+}
+
+function copyToClipboard(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  // Older browser fallback
+  const ta = document.createElement('textarea');
+  ta.value = text; document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); } catch (_) {}
+  document.body.removeChild(ta);
+  return Promise.resolve();
+}
+
+function ApplyRecsModal({ rows, callsites, onClose }) {
+  // rows is the already filtered "eligible" set from DoneStage:
+  // [{ e, t }, ...] where t.meetsBar && t.savedPerCall > 0.
+  const [copiedKey, setCopiedKey] = useS_d(null);
+
+  // Map callsite_id (or eval id, since evals reference callsites) to
+  // provider/file_path/line. callsites array comes from /api/projects/:id.
+  const csByLabel = {};
+  for (const c of (callsites || [])) {
+    csByLabel[`${c.file_path}:${c.line}`] = c;
+  }
+
+  // Lock body scroll + Escape-to-close for the modal lifetime.
+  useE_d(() => {
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [onClose]);
+
+  function copyOne(key, text) {
+    copyToClipboard(text).then(() => {
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey((k) => k === key ? null : k), 1500);
+    });
+  }
+
+  function copyAll() {
+    const all = rows.map(({ e, t }) => {
+      const newId = unprefixModelId(t.winner);
+      return `# ${e.callsite}\n${buildDiff(e.currentModel, newId)}`;
+    }).join('\n\n');
+    copyOne('__all__', all);
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-window" onClick={(ev) => ev.stopPropagation()}>
+        <div style={{ padding: "20px 28px 16px", borderBottom: "1px solid var(--hairline)", display: "flex", alignItems: "flex-start", gap: 16 }}>
+          <div style={{ flex: 1 }}>
+            <div className="eyebrow">Migration</div>
+            <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 24, marginTop: 4 }}>
+              Apply recommendations
+            </div>
+            <div className="muted" style={{ fontSize: 13, marginTop: 8, lineHeight: 1.5 }}>
+              {rows.length === 0
+                ? "No callsites qualify at the current quality bar. Lower the bar or add more challenger models, then re-open this dialog."
+                : `${rows.length} callsite${rows.length === 1 ? '' : 's'} qualify. Crucible does not modify your code. Review each change below and apply manually, or copy all and paste into your editor.`}
+            </div>
+          </div>
+          <button className="btn-quiet" onClick={onClose} title="Close" style={{ padding: 6 }}>
+            <Icon name="x" size={18} />
+          </button>
+        </div>
+
+        {rows.length > 0 && (
+          <div style={{ padding: "20px 28px", display: "flex", flexDirection: "column", gap: 16, maxHeight: "60vh", overflowY: "auto" }}>
+            {rows.map(({ e, t }, i) => {
+              const newId = unprefixModelId(t.winner);
+              const cs = csByLabel[e.callsite] || {};
+              const provider = cs.provider || (
+                (e.currentModel || '').includes('claude') ? 'anthropic'
+                  : (e.currentModel || '').includes('gpt') ? 'openai'
+                  : (e.currentModel || '').includes('gemini') ? 'google'
+                  : 'unknown'
+              );
+              const kind = classifyMigration(provider, t.winner);
+              const note = migrationNote(kind, provider, t.winner);
+              const diff = buildDiff(e.currentModel, newId);
+              const key = `card-${i}`;
+              const isCopied = copiedKey === key;
+              const kindLabel = kind === 'same-provider' ? 'Same provider swap'
+                              : kind === 'same-sdk' ? 'Same SDK swap'
+                              : 'Cross vendor migration';
+              const kindChipClass = kind === 'cross-vendor' ? 'chip warn' : 'chip pass';
+              return (
+                <div key={e.id} className="card" style={{ padding: 0 }}>
+                  <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--hairline)" }}>
+                    <div className="row" style={{ alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                      <span className="mono faint" style={{ fontSize: 11, fontWeight: 600 }}>#{i + 1}</span>
+                      <span className="mono" style={{ fontSize: 13, fontWeight: 500 }}>{e.callsite}</span>
+                      <span className={kindChipClass} style={{ fontSize: 10, marginLeft: 4 }}>
+                        {kindLabel}
+                      </span>
+                    </div>
+                    <div className="muted" style={{ fontSize: 12.5, marginTop: 8, lineHeight: 1.5 }}>{note}</div>
+                  </div>
+                  <pre className="mono" style={{
+                    margin: 0, padding: "14px 18px", fontSize: 12.5, lineHeight: 1.6,
+                    background: "rgba(15,14,12,0.025)", whiteSpace: "pre-wrap", wordBreak: "break-word",
+                  }}>
+{diff.split('\n').map((line, j) => (
+  <div key={j} style={{
+    color: line.startsWith('+') ? "var(--pass, #4a6b3f)" : line.startsWith('-') ? "var(--fail, #8b2a1a)" : "var(--ink)",
+  }}>{line}</div>
+))}
+                  </pre>
+                  <div style={{ padding: "10px 18px", borderTop: "1px solid var(--hairline)", display: "flex", justifyContent: "flex-end" }}>
+                    <button className="btn btn-ghost" onClick={() => copyOne(key, diff)} style={{ fontSize: 12 }}>
+                      {isCopied ? <><Icon name="check" size={13} />Copied</> : <><Icon name="code" size={13} />Copy diff</>}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <div style={{ padding: "14px 28px", borderTop: "1px solid var(--hairline)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div className="muted" style={{ fontSize: 11.5 }}>
+            Crucible never writes to your repo. Apply manually.
+          </div>
+          <div className="row gap-2">
+            {rows.length > 0 && (
+              <button className="btn btn-ghost" onClick={copyAll}>
+                {copiedKey === '__all__' ? <><Icon name="check" size={14} />Copied</> : <>Copy all diffs</>}
+              </button>
+            )}
+            <button className="btn btn-primary" onClick={onClose}>Close</button>
+          </div>
+        </div>
       </div>
     </div>
   );

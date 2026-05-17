@@ -98,6 +98,24 @@ a { color: inherit; }
 .hairline-b { border-bottom: 1px solid var(--hairline); }
 .row-clickable:hover { background: rgba(15, 14, 12, 0.035); }
 
+/* ============ Modal ============ */
+.modal-backdrop {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(15, 14, 12, 0.55);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 60px 24px; overflow-y: auto;
+  animation: modalIn 0.15s ease-out;
+}
+.modal-window {
+  background: var(--paper);
+  border: 1px solid #B8A87E;
+  border-radius: 3px;
+  box-shadow: 0 8px 32px rgba(15,14,12,0.18);
+  width: 100%; max-width: 880px;
+  display: flex; flex-direction: column;
+}
+@keyframes modalIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+
 /* ============ Scrollbar ============ */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
