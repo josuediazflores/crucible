@@ -1096,6 +1096,9 @@ function DoneStage({ project, evaluations, callsites, onOpenEval }) {
         <ApplyRecsModal
           rows={eligible}
           callsites={callsites || []}
+          projectId={project.id}
+          projectName={project.name}
+          qualityBar={qualityBar}
           onClose={() => setApplyOpen(false)}
         />
       )}
@@ -1622,10 +1625,12 @@ function copyToClipboard(text) {
   return Promise.resolve();
 }
 
-function ApplyRecsModal({ rows, callsites, onClose }) {
+function ApplyRecsModal({ rows, callsites, projectId, projectName, qualityBar, onClose }) {
   // rows is the already filtered "eligible" set from DoneStage:
   // [{ e, t }, ...] where t.meetsBar && t.savedPerCall > 0.
   const [copiedKey, setCopiedKey] = useS_d(null);
+  const [patchBusy, setPatchBusy] = useS_d(false);
+  const [patchError, setPatchError] = useS_d(null);
 
   // Map callsite_id (or eval id, since evals reference callsites) to
   // provider/file_path/line. callsites array comes from /api/projects/:id.
@@ -1659,6 +1664,28 @@ function ApplyRecsModal({ rows, callsites, onClose }) {
       return `# ${e.callsite}\n${buildDiff(e.currentModel, newId)}`;
     }).join('\n\n');
     copyOne('__all__', all);
+  }
+
+  async function downloadPatch() {
+    if (patchBusy || !projectId) return;
+    setPatchBusy(true); setPatchError(null);
+    try {
+      const url = `/api/projects/${encodeURIComponent(projectId)}/patch?qualityBar=${qualityBar || 80}`;
+      const res = await fetch(url, { credentials: 'include' });
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try { const body = await res.json(); if (body.error) msg = body.error; } catch (_) {}
+        throw new Error(msg);
+      }
+      const text = await res.text();
+      const safeName = String(projectName || 'project').replace(/[^a-zA-Z0-9_-]/g, '_');
+      downloadText(text, `crucible-${safeName}.patch`, 'text/x-patch;charset=utf-8');
+    } catch (e) {
+      setPatchError(e.message || String(e));
+      setTimeout(() => setPatchError(null), 6000);
+    } finally {
+      setPatchBusy(false);
+    }
   }
 
   return (
@@ -1735,14 +1762,19 @@ function ApplyRecsModal({ rows, callsites, onClose }) {
         )}
 
         <div style={{ padding: "14px 28px", borderTop: "1px solid var(--hairline)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          <div className="muted" style={{ fontSize: 11.5 }}>
-            Crucible never writes to your repo. Apply manually.
+          <div style={{ fontSize: 11.5, color: patchError ? "var(--fail)" : "var(--ink-faint)", maxWidth: 360 }}>
+            {patchError || 'Crucible never writes to your repo. Apply manually with git apply.'}
           </div>
           <div className="row gap-2">
             {rows.length > 0 && (
-              <button className="btn btn-ghost" onClick={copyAll}>
-                {copiedKey === '__all__' ? <><Icon name="check" size={14} />Copied</> : <>Copy all diffs</>}
-              </button>
+              <>
+                <button className="btn btn-ghost" onClick={copyAll}>
+                  {copiedKey === '__all__' ? <><Icon name="check" size={14} />Copied</> : <>Copy all diffs</>}
+                </button>
+                <button className="btn btn-ghost" onClick={downloadPatch} disabled={patchBusy}>
+                  {patchBusy ? 'Building patch…' : 'Download .patch'}
+                </button>
+              </>
             )}
             <button className="btn btn-primary" onClick={onClose}>Close</button>
           </div>

@@ -2,8 +2,10 @@ require('dotenv').config();
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const db = require('./db');
+const { projectWorkDir } = require('./scanner');
 const {
   createUser, verifyPassword, updateProfile, changePassword,
   startSession, destroySession,
@@ -195,6 +197,163 @@ app.post('/api/projects/:id/rescan', requireAuth, (req, res) => {
     distinct_models=0, status_text='Queued for probing…', error=NULL, updated_at=? WHERE id=?`)
     .run(Date.now(), p.id);
   res.json({ ok: true });
+});
+
+// ---- Patch generation -----------------------------------------------------
+// Re-implementations of the client-side threshold logic so the server
+// can independently decide which callsites qualify. Kept tiny and
+// dependency free; mirrors pickWinnerAt + evalAtThreshold in screens-app.jsx.
+function _pickWinnerAt(results, threshold) {
+  if (!results || !results.per_challenger) return null;
+  const entries = Object.entries(results.per_challenger);
+  let best = null;
+  for (const [model, info] of entries) {
+    if ((info.pass_rate || 0) >= threshold) {
+      const cost = Number(info.total_cost) || 0;
+      if (!best || cost < (best.total_cost ?? Infinity)) {
+        best = { model, pass_rate: info.pass_rate || 0, total_cost: cost, meetsBar: true };
+      }
+    }
+  }
+  if (best) return best;
+  for (const [model, info] of entries) {
+    if (!best || (info.pass_rate || 0) > (best.pass_rate || -1)) {
+      best = { model, pass_rate: info.pass_rate || 0, total_cost: Number(info.total_cost) || 0, meetsBar: false };
+    }
+  }
+  return best;
+}
+function _unprefixModelId(adalKey) {
+  if (!adalKey) return '';
+  const prefixes = ['openai-', 'anthropic-', 'google-', 'zai-', 'deepseek-', 'kimi-', 'minimax-', 'chatgpt_web-'];
+  for (const p of prefixes) {
+    if (adalKey.startsWith(p)) return adalKey.slice(p.length);
+  }
+  return adalKey;
+}
+
+// Construct one unified diff hunk for a single line replacement, with up
+// to 3 lines of context above and below. `findStr` is the exact model
+// string the scanner detected, which we replace with `newId`.
+function _buildHunk(lines, targetLineIdx, findStr, newId) {
+  let foundIdx = -1;
+  if (targetLineIdx >= 0 && targetLineIdx < lines.length && lines[targetLineIdx].includes(findStr)) {
+    foundIdx = targetLineIdx;
+  } else {
+    for (let d = 1; d <= 5 && foundIdx === -1; d++) {
+      if (targetLineIdx - d >= 0 && lines[targetLineIdx - d].includes(findStr)) foundIdx = targetLineIdx - d;
+      else if (targetLineIdx + d < lines.length && lines[targetLineIdx + d].includes(findStr)) foundIdx = targetLineIdx + d;
+    }
+  }
+  if (foundIdx === -1) return { hunk: null, reason: `'${findStr}' not found within 5 lines of expected location` };
+  const oldLine = lines[foundIdx];
+  const newLine = oldLine.replace(findStr, newId);
+  if (newLine === oldLine) return { hunk: null, reason: 'replacement would be a no-op' };
+
+  const ctxStart = Math.max(0, foundIdx - 3);
+  const ctxEnd = Math.min(lines.length, foundIdx + 4);
+  const oldStart = ctxStart + 1;
+  const count = ctxEnd - ctxStart;
+
+  const body = [];
+  for (let i = ctxStart; i < ctxEnd; i++) {
+    if (i === foundIdx) {
+      body.push('-' + oldLine);
+      body.push('+' + newLine);
+    } else {
+      body.push(' ' + lines[i]);
+    }
+  }
+  return { hunk: `@@ -${oldStart},${count} +${oldStart},${count} @@\n${body.join('\n')}` };
+}
+
+app.get('/api/projects/:id/patch', requireAuth, (req, res) => {
+  const p = getProject(req.user.id, req.params.id);
+  if (!p) return res.status(404).json({ error: 'Not found' });
+
+  const workDir = projectWorkDir(p.id);
+  if (!fs.existsSync(workDir)) {
+    return res.status(410).json({
+      error: 'Patch unavailable. The repository was not cloned to disk for this project. Demo projects skip cloning; only projects scanned from a real GitHub repo have downloadable patches.'
+    });
+  }
+
+  const qualityBar = Math.max(50, Math.min(100, Number(req.query.qualityBar) || 80));
+
+  const rows = db.prepare(`
+    SELECT e.id as eval_id, e.current_model, e.test_count, e.results_json,
+           c.file_path, c.line, c.model as callsite_model
+    FROM evaluations e
+    JOIN callsites c ON c.id = e.callsite_id
+    WHERE e.project_id = ?
+    ORDER BY c.file_path, c.line
+  `).all(p.id);
+
+  const eligible = [];
+  for (const r of rows) {
+    if (!r.results_json) continue;
+    let results;
+    try { results = JSON.parse(r.results_json); } catch { continue; }
+    const winner = _pickWinnerAt(results, qualityBar);
+    if (!winner || !winner.meetsBar) continue;
+    const cur = Number(results.current_total_cost) || 0;
+    const win = Number(winner.total_cost) || 0;
+    if (cur <= 0 || cur <= win) continue;
+    eligible.push({
+      file_path: r.file_path,
+      line: r.line,
+      callsiteModel: r.callsite_model || r.current_model,
+      winnerKey: winner.model,
+    });
+  }
+
+  if (eligible.length === 0) {
+    return res.status(404).json({
+      error: `No callsites qualify at the ${qualityBar}% quality bar. Lower the threshold or add more challenger models, then try again.`
+    });
+  }
+
+  const byFile = {};
+  for (const e of eligible) {
+    if (!byFile[e.file_path]) byFile[e.file_path] = [];
+    byFile[e.file_path].push(e);
+  }
+
+  const parts = [];
+  const warnings = [];
+  for (const [filePath, entries] of Object.entries(byFile)) {
+    const absPath = path.join(workDir, filePath);
+    let content;
+    try { content = fs.readFileSync(absPath, 'utf8'); }
+    catch { warnings.push(`# skipped: ${filePath} not found on disk`); continue; }
+    const lines = content.split('\n');
+    const hunks = [];
+    // Sort entries by line ascending so multiple hunks in one file appear in order.
+    entries.sort((a, b) => a.line - b.line);
+    for (const ent of entries) {
+      const newId = _unprefixModelId(ent.winnerKey);
+      const { hunk, reason } = _buildHunk(lines, ent.line - 1, ent.callsiteModel, newId);
+      if (!hunk) {
+        warnings.push(`# skipped ${filePath}:${ent.line} (${reason})`);
+        continue;
+      }
+      hunks.push(hunk);
+    }
+    if (hunks.length === 0) continue;
+    parts.push([
+      `diff --git a/${filePath} b/${filePath}`,
+      `--- a/${filePath}`,
+      `+++ b/${filePath}`,
+      ...hunks,
+    ].join('\n'));
+  }
+
+  let body = '';
+  if (warnings.length) body += warnings.join('\n') + '\n\n';
+  body += parts.join('\n\n') + '\n';
+
+  res.set('Content-Type', 'text/x-patch; charset=utf-8');
+  res.send(body);
 });
 
 // ---- helpers --------------------------------------------------------------
