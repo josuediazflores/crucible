@@ -90,8 +90,9 @@ a { color: inherit; }
 /* ============ Card / hairline ============ */
 .card {
   background: var(--paper-sunken);
-  border: 1px solid var(--hairline);
-  border-radius: 2px;
+  border: 1px solid #B8A87E;
+  border-radius: 3px;
+  box-shadow: 0 1px 0 rgba(15, 14, 12, 0.04), 0 2px 8px rgba(15, 14, 12, 0.03);
 }
 .hairline-t { border-top: 1px solid var(--hairline); }
 .hairline-b { border-bottom: 1px solid var(--hairline); }

@@ -757,21 +757,39 @@ function Documentation() {
           </ul>
         </div>
 
-        <div className="card" style={{ padding: 24 }}>
-          <div className="eyebrow" style={{ marginBottom: 4 }}>Configuration</div>
-          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginBottom: 12 }}>Environment variables</div>
-          <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "10px 16px", fontSize: 13.5, lineHeight: 1.5 }}>
-            <code className="mono" style={{ whiteSpace: "nowrap" }}>ADAL_CMD</code>
-            <div>Path to the <code className="mono">adal</code> binary. Default: <code className="mono">adal</code>.</div>
-            <code className="mono" style={{ whiteSpace: "nowrap" }}>ADAL_CONCURRENCY</code>
-            <div>Max concurrent <code className="mono">adal -q</code> subprocesses. Default <code className="mono">1</code>; bump cautiously.</div>
-            <code className="mono" style={{ whiteSpace: "nowrap" }}>JUDGE_MODEL</code>
-            <div>ADAL catalog key used as the judge. Default <code className="mono">anthropic-claude-opus-4-7</code>.</div>
-            <code className="mono" style={{ whiteSpace: "nowrap" }}>FORGER_MODEL</code>
-            <div>ADAL catalog key for eval drafting. Default <code className="mono">anthropic-claude-sonnet-4-6</code>.</div>
-            <code className="mono" style={{ whiteSpace: "nowrap" }}>CHALLENGER_MODELS</code>
-            <div>Comma-separated ADAL catalog keys to benchmark.</div>
+        <div className="card" style={{ padding: 0 }}>
+          <div style={{ padding: "24px 24px 18px" }}>
+            <div className="eyebrow" style={{ marginBottom: 4 }}>Configuration</div>
+            <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18 }}>Environment variables</div>
+            <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>Set in your <code className="mono">.env</code> file. All have safe defaults.</div>
           </div>
+          {[
+            { key: "ADAL_CMD",          desc: <>Path to the <code className="mono">adal</code> binary.</>,                      def: "adal" },
+            { key: "ADAL_CONCURRENCY",  desc: <>Max concurrent <code className="mono">adal -q</code> subprocesses.</>,           def: "1" },
+            { key: "JUDGE_MODEL",       desc: <>ADAL catalog key used as the judge.</>,                                          def: "anthropic-claude-opus-4-7" },
+            { key: "FORGER_MODEL",      desc: <>ADAL catalog key for eval drafting.</>,                                          def: "anthropic-claude-sonnet-4-6" },
+            { key: "CHALLENGER_MODELS", desc: <>Comma-separated ADAL catalog keys to benchmark.</>,                              def: "haiku, gemini-flash, …" },
+          ].map((row, i, arr) => (
+            <div key={row.key} style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(170px, max-content) 1fr",
+              gap: 28,
+              padding: "14px 24px",
+              borderTop: "1px solid var(--hairline)",
+              alignItems: "baseline",
+              background: i % 2 === 1 ? "rgba(15, 14, 12, 0.015)" : "transparent",
+            }}>
+              <code className="mono" style={{ fontSize: 12.5, fontWeight: 600, color: "var(--ink)", letterSpacing: 0.2 }}>
+                {row.key}
+              </code>
+              <div style={{ fontSize: 13.5, lineHeight: 1.55, color: "var(--ink-muted)" }}>
+                {row.desc}
+                <div className="mono" style={{ fontSize: 11.5, color: "var(--ink-faint)", marginTop: 4 }}>
+                  Default <code className="mono" style={{ color: "var(--ink-muted)" }}>{row.def}</code>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
 
         <div className="card" style={{ padding: 24 }}>
