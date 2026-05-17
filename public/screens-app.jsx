@@ -493,20 +493,56 @@ const thStyle = { textAlign: "left", padding: "12px 20px", fontSize: 11, fontFam
 const tdStyle = { padding: "14px 20px", verticalAlign: "top" };
 
 /* ----- Stage 4: Done ----- */
-/* Compute per-eval, per-call savings in USD using results.current_total_cost
-   and results.winner_total_cost (already stored by tempering.js). Returns null
-   when the data is missing or non-positive. */
-function perEvalSaved(e) {
+/* Pick the winner client-side at a given quality threshold. Mirrors the
+   backend logic in tempering.js so the user can drag a slider and see the
+   recommendation shift live, without re-running the pipeline.
+   Returns { model, pass_rate, total_cost, meetsBar } or null. */
+function pickWinnerAt(results, threshold) {
+  if (!results || !results.per_challenger) return null;
+  const entries = Object.entries(results.per_challenger);
+  let best = null;
+  // Cheapest challenger meeting the bar.
+  for (const [model, info] of entries) {
+    if ((info.pass_rate || 0) >= threshold) {
+      const cost = Number(info.total_cost) || 0;
+      if (!best || cost < (best.total_cost ?? Infinity)) {
+        best = { model, pass_rate: info.pass_rate || 0, total_cost: cost, meetsBar: true };
+      }
+    }
+  }
+  if (best) return best;
+  // Fallback: highest pass rate, regardless of bar (matches backend).
+  for (const [model, info] of entries) {
+    if (!best || (info.pass_rate || 0) > (best.pass_rate || -1)) {
+      best = { model, pass_rate: info.pass_rate || 0, total_cost: Number(info.total_cost) || 0, meetsBar: false };
+    }
+  }
+  return best;
+}
+
+/* Project a single eval's economics at a given quality bar. */
+function evalAtThreshold(e, threshold) {
+  const empty = { winner: null, passRate: null, savingsPct: 0, savedPerCall: 0, currentPerCall: 0, meetsBar: false };
   const r = e?.results;
-  if (!r) return null;
-  const n = e.testCount || 0;
-  if (!n) return null;
+  if (!r) return empty;
+  const w = pickWinnerAt(r, threshold);
+  if (!w) return empty;
+  const tc = e.testCount || 1;
   const cur = Number(r.current_total_cost) || 0;
-  const win = Number(r.winner_total_cost) || 0;
-  if (cur <= 0) return null;          // can't project off zero baseline
-  const perCall = (cur - win) / n;
-  if (perCall <= 0) return 0;          // winner not actually cheaper
-  return perCall;
+  const win = Number(w.total_cost) || 0;
+  if (cur <= 0) {
+    return { winner: w.model, passRate: w.pass_rate, savingsPct: 0, savedPerCall: 0, currentPerCall: 0, meetsBar: w.meetsBar };
+  }
+  const savedPerCall = (cur > win) ? (cur - win) / tc : 0;
+  const savingsPct = Math.max(0, Math.round((cur - win) / cur * 100));
+  return {
+    winner: w.model,
+    passRate: w.pass_rate,
+    savingsPct,
+    savedPerCall,
+    currentPerCall: cur / tc,
+    meetsBar: w.meetsBar,
+  };
 }
 
 function formatUSD(n) {
@@ -517,21 +553,24 @@ function formatUSD(n) {
   return '$' + n.toFixed(2);
 }
 
-function CostProjection({ evaluations, monthly, setMonthly }) {
-  const projectables = evaluations.filter(e => perEvalSaved(e) !== null);
+function CostProjection({ evaluations, monthly, setMonthly, qualityBar, setQualityBar }) {
+  // Per-eval threshold-aware projection (memoize the array work).
+  const rows = evaluations.map(e => ({ e, t: evalAtThreshold(e, qualityBar) }));
+  const projectables = rows.filter(({ t }) => t.currentPerCall > 0);
   if (!projectables.length) return null;
 
-  const evalCount = projectables.length;
-  const perEvalCalls = Math.max(0, Math.floor((monthly || 0) / evalCount));
-  const savedPerMonth = projectables.reduce((acc, e) => acc + (perEvalSaved(e) || 0) * perEvalCalls, 0);
-  const currentPerMonth = projectables.reduce((acc, e) => {
-    const r = e.results || {};
-    const cur = Number(r.current_total_cost) || 0;
-    return acc + (cur / (e.testCount || 1)) * perEvalCalls;
-  }, 0);
+  const eligible = projectables.filter(({ t }) => t.meetsBar && t.savedPerCall > 0);
+  // Spread monthly traffic evenly across ALL projectable callsites
+  // (honest model — raising the bar drops dollars saved, doesn't concentrate them).
+  const denom = Math.max(1, projectables.length);
+  const perEvalCalls = Math.max(0, Math.floor((monthly || 0) / denom));
+
+  const savedPerMonth = eligible.reduce((acc, { t }) => acc + t.savedPerCall * perEvalCalls, 0);
+  const currentPerMonth = projectables.reduce((acc, { t }) => acc + t.currentPerCall * perEvalCalls, 0);
   const pctReclaimed = currentPerMonth > 0 ? Math.round((savedPerMonth / currentPerMonth) * 100) : 0;
 
-  const presets = [1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+  const volPresets = [1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+  const barPresets = [60, 70, 80, 90];
 
   return (
     <div className="card" style={{ padding: 0 }}>
@@ -543,38 +582,75 @@ function CostProjection({ evaluations, monthly, setMonthly }) {
         </div>
       </div>
 
-      <div style={{ padding: "20px 24px", borderBottom: "1px solid var(--hairline)" }}>
-        <div className="row" style={{ alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 14 }}>If this code handles</span>
-          <input
-            className="input"
-            type="number"
-            min={0}
-            step={1000}
-            value={monthly}
-            onChange={e => setMonthly(Math.max(0, Number(e.target.value) || 0))}
-            style={{ width: 180, fontSize: 18, fontFamily: "var(--font-display)", fontWeight: 900, borderBottom: "2px solid var(--ink)", padding: "6px 0" }}
-          />
-          <span style={{ fontSize: 14 }}>requests / month…</span>
+      <div style={{ padding: "20px 24px", borderBottom: "1px solid var(--hairline)", display: "flex", flexDirection: "column", gap: 20 }}>
+        {/* Volume */}
+        <div>
+          <div className="row" style={{ alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 14 }}>If this code handles</span>
+            <input
+              className="input"
+              type="number"
+              min={0}
+              step={1000}
+              value={monthly}
+              onChange={e => setMonthly(Math.max(0, Number(e.target.value) || 0))}
+              style={{ width: 180, fontSize: 18, fontFamily: "var(--font-display)", fontWeight: 900, borderBottom: "2px solid var(--ink)", padding: "6px 0" }}
+            />
+            <span style={{ fontSize: 14 }}>requests / month…</span>
+          </div>
+          <div className="row gap-2" style={{ marginTop: 12, flexWrap: "wrap" }}>
+            {volPresets.map(p => (
+              <button
+                key={p}
+                className="chip"
+                onClick={() => setMonthly(p)}
+                style={{
+                  cursor: "pointer",
+                  background: monthly === p ? "var(--ink)" : "transparent",
+                  color: monthly === p ? "var(--paper)" : "var(--ink-muted)",
+                  border: "1px solid " + (monthly === p ? "var(--ink)" : "var(--hairline)"),
+                  padding: "6px 12px",
+                  fontSize: 11,
+                }}
+              >
+                {p >= 1_000_000 ? (p / 1_000_000) + 'M' : (p / 1000) + 'K'}
+              </button>
+            ))}
+          </div>
         </div>
-        <div className="row gap-2" style={{ marginTop: 12, flexWrap: "wrap" }}>
-          {presets.map(p => (
-            <button
-              key={p}
-              className={"chip"}
-              onClick={() => setMonthly(p)}
-              style={{
-                cursor: "pointer",
-                background: monthly === p ? "var(--ink)" : "transparent",
-                color: monthly === p ? "var(--paper)" : "var(--ink-muted)",
-                border: "1px solid " + (monthly === p ? "var(--ink)" : "var(--hairline)"),
-                padding: "6px 12px",
-                fontSize: 11,
-              }}
-            >
-              {p >= 1_000_000 ? (p / 1_000_000) + 'M' : (p / 1000) + 'K'}
-            </button>
-          ))}
+
+        {/* Quality bar */}
+        <div>
+          <div className="row" style={{ alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 14 }}>…and you accept models passing</span>
+            <span style={{ fontSize: 22, fontFamily: "var(--font-display)", fontWeight: 900, minWidth: 56, color: "var(--ink)" }}>{qualityBar}%</span>
+            <span style={{ fontSize: 14 }}>of test cases or more.</span>
+          </div>
+          <input
+            type="range" min={50} max={100} step={5}
+            value={qualityBar}
+            onChange={e => setQualityBar(Number(e.target.value))}
+            style={{ width: "100%", marginTop: 14, accentColor: "var(--ember)" }}
+          />
+          <div className="row gap-2" style={{ marginTop: 8, flexWrap: "wrap" }}>
+            {barPresets.map(p => (
+              <button
+                key={p}
+                className="chip"
+                onClick={() => setQualityBar(p)}
+                style={{
+                  cursor: "pointer",
+                  background: qualityBar === p ? "var(--ink)" : "transparent",
+                  color: qualityBar === p ? "var(--paper)" : "var(--ink-muted)",
+                  border: "1px solid " + (qualityBar === p ? "var(--ink)" : "var(--hairline)"),
+                  padding: "6px 12px",
+                  fontSize: 11,
+                }}
+              >
+                {p}%
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -598,18 +674,99 @@ function CostProjection({ evaluations, monthly, setMonthly }) {
           <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>spend reclaimed</div>
         </div>
       </div>
+
+      <div style={{ padding: "10px 24px 14px", borderTop: "1px solid var(--hairline)", fontSize: 11, color: "var(--ink-faint)" }}>
+        {eligible.length} of {evaluations.length} callsite{evaluations.length === 1 ? '' : 's'} qualify at {qualityBar}% pass rate.
+      </div>
     </div>
   );
 }
 
+/* Build a Markdown report from the current threshold-aware view. */
+function generateReport(project, evals, qualityBar, monthly) {
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const rows = evals.map(e => ({ e, t: evalAtThreshold(e, qualityBar) }));
+  const projectables = rows.filter(({ t }) => t.currentPerCall > 0);
+  const eligible = projectables.filter(({ t }) => t.meetsBar && t.savedPerCall > 0);
+  const denom = Math.max(1, projectables.length);
+  const perEvalCalls = Math.max(0, Math.floor((monthly || 0) / denom));
+  const totalMonthly = eligible.reduce((a, r) => a + r.t.savedPerCall * perEvalCalls, 0);
+  const totalCurrent = projectables.reduce((a, r) => a + r.t.currentPerCall * perEvalCalls, 0);
+  const pctReclaimed = totalCurrent > 0 ? Math.round((totalMonthly / totalCurrent) * 100) : 0;
+
+  let md = `# Crucible Report — ${project.fullName || project.name}\n\n`;
+  md += `Generated ${dateStr} · quality bar = ${qualityBar}% · volume = ${(monthly || 0).toLocaleString()} req/month\n\n`;
+  md += `## Summary\n\n`;
+  md += `- **${eligible.length} of ${evals.length} callsites** qualify for migration at ≥${qualityBar}% pass rate.\n`;
+  md += `- **Projected savings**: ${formatUSD(totalMonthly)} / month, ${formatUSD(totalMonthly * 12)} / year.\n`;
+  md += `- **Spend reclaimed**: ${pctReclaimed}%.\n\n`;
+
+  if (eligible.length === 0) {
+    md += `_No callsites meet the threshold at this quality bar. Lower the bar or add more challenger models in \`CHALLENGER_MODELS\`._\n\n`;
+  } else {
+    md += `## Recommendations\n\n`;
+    eligible.forEach((r, i) => {
+      const { e, t } = r;
+      const monthlyDollar = formatUSD(t.savedPerCall * perEvalCalls);
+      md += `### ${i + 1}. ${e.title}\n\n`;
+      md += `- **Location**: \`${e.callsite}\`\n`;
+      md += `- **Current**: \`${e.currentModel}\`\n`;
+      md += `- **Recommended**: \`${t.winner}\`\n`;
+      md += `- **Pass rate**: ${t.passRate}%\n`;
+      md += `- **Cost reduction**: ${t.savingsPct}%\n`;
+      md += `- **Projected at this volume**: ${monthlyDollar} / month\n\n`;
+    });
+  }
+
+  const skipped = projectables.filter(r => !(r.t.meetsBar && r.t.savedPerCall > 0));
+  if (skipped.length) {
+    md += `## Skipped\n\n`;
+    skipped.forEach(r => {
+      const reason = !r.t.meetsBar
+        ? `pass rate ${r.t.passRate ?? '—'}% is below the ${qualityBar}% bar`
+        : `no cost reduction available with current challengers`;
+      md += `- **${r.e.title}** \`${r.e.callsite}\` — ${reason}.\n`;
+    });
+    md += `\n`;
+  }
+
+  md += `---\n\n`;
+  md += `_Methodology: each callsite was reverse-engineered into a set of representative test cases. Every test was run against the current model and each challenger via the ADAL CLI; Claude Opus 4.7 served as the judge. Pass rate is the fraction of cases the challenger matched in quality. Cost estimates use measured tokens × public list pricing — for planning, not invoicing._\n\n`;
+  md += `_Generated by [Crucible](https://github.com/josuediazflores/crucible)._\n`;
+  return md;
+}
+
+function downloadText(text, filename, mime = 'text/markdown;charset=utf-8') {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function DoneStage({ project, evaluations, onOpenEval }) {
   const evals = evaluations || [];
-  const passing = evals.filter(e => (e.savingsPct || 0) > 0);
-  const avg = passing.length ? Math.round(passing.reduce((a,e)=>a+(e.savingsPct||0),0) / passing.length) : 0;
 
   const [monthly, setMonthly] = useS_d(1_000_000);
-  const evalCount = evals.filter(e => perEvalSaved(e) !== null).length || 1;
-  const perEvalCalls = Math.floor(monthly / evalCount);
+  const [qualityBar, setQualityBar] = useS_d(80);
+
+  const rows = evals.map(e => ({ e, t: evalAtThreshold(e, qualityBar) }));
+  const projectables = rows.filter(({ t }) => t.currentPerCall > 0);
+  const eligible = projectables.filter(({ t }) => t.meetsBar && t.savedPerCall > 0);
+  const denom = Math.max(1, projectables.length);
+  const perEvalCalls = Math.floor(monthly / denom);
+
+  // Verdict-card avg savings comes from threshold-aware eligible set.
+  const avg = eligible.length
+    ? Math.round(eligible.reduce((a, r) => a + r.t.savingsPct, 0) / eligible.length)
+    : 0;
+
+  const onDownloadReport = () => {
+    const safeName = String(project.name || 'project').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const filename = `crucible-${safeName}-${qualityBar}pct.md`;
+    downloadText(generateReport(project, evals, qualityBar, monthly), filename);
+  };
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 24 }}>
@@ -619,12 +776,16 @@ function DoneStage({ project, evaluations, onOpenEval }) {
           You're overpaying by <span style={{ color: "var(--ember)" }}>{avg}%</span>.
         </div>
         <div style={{ color: "rgba(245,241,232,0.7)", fontSize: 15, maxWidth: 640 }}>
-          {evals.length} evaluations completed. For each callsite, Crucible found a smaller model
-          that meets your quality bar. Switch with confidence — every winner passes the same tests.
+          {evals.length} evaluations completed. {eligible.length} callsite{eligible.length === 1 ? '' : 's'} qualify for
+          migration at the {qualityBar}% quality bar — every winner passes the same tests.
         </div>
       </div>
 
-      <CostProjection evaluations={evals} monthly={monthly} setMonthly={setMonthly} />
+      <CostProjection
+        evaluations={evals}
+        monthly={monthly} setMonthly={setMonthly}
+        qualityBar={qualityBar} setQualityBar={setQualityBar}
+      />
 
       <div className="card" style={{ padding: 0 }}>
         <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--hairline)" }}>
@@ -643,15 +804,19 @@ function DoneStage({ project, evaluations, onOpenEval }) {
             </tr>
           </thead>
           <tbody>
-            {evals.map((e, i) => {
-              const saved = perEvalSaved(e);
-              const dollars = saved !== null && saved > 0 ? saved * perEvalCalls : null;
+            {rows.map(({ e, t }, i) => {
+              const qualifies = t.meetsBar && t.savedPerCall > 0;
+              const dollars = qualifies ? t.savedPerCall * perEvalCalls : null;
               return (
                 <tr
                   key={e.id}
                   className="row-clickable"
                   onClick={() => onOpenEval && onOpenEval(e.id)}
-                  style={{ borderBottom: i < evals.length - 1 ? "1px solid var(--hairline)" : "none", cursor: onOpenEval ? "pointer" : "default" }}
+                  style={{
+                    borderBottom: i < rows.length - 1 ? "1px solid var(--hairline)" : "none",
+                    cursor: onOpenEval ? "pointer" : "default",
+                    opacity: qualifies ? 1 : 0.55,
+                  }}
                 >
                   <td style={tdStyle}>
                     <div style={{ fontWeight: 500 }}>{e.title}</div>
@@ -659,16 +824,20 @@ function DoneStage({ project, evaluations, onOpenEval }) {
                   </td>
                   <td style={tdStyle}><span className="mono">{e.currentModel}</span></td>
                   <td style={tdStyle}>
-                    <span className="mono" style={{ color: "var(--ember-deep)", fontWeight: 500 }}>{e.winner || '—'}</span>
+                    {qualifies
+                      ? <span className="mono" style={{ color: "var(--ember-deep)", fontWeight: 500 }}>{t.winner}</span>
+                      : <span className="muted">—</span>}
                   </td>
                   <td style={tdStyle}>
                     <div className="row gap-2">
-                      <span style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18 }}>{e.passRate ?? '—'}%</span>
-                      {e.passRate >= 80 && <span className="chip pass" style={{ fontSize: 10 }}>pass</span>}
+                      <span style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18 }}>{t.passRate ?? '—'}%</span>
+                      {qualifies && <span className="chip pass" style={{ fontSize: 10 }}>pass</span>}
                     </div>
                   </td>
                   <td style={{ ...tdStyle, textAlign: "right" }}>
-                    <span style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 22, color: "var(--ember)" }}>−{e.savingsPct || 0}%</span>
+                    {qualifies
+                      ? <span style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 22, color: "var(--ember)" }}>−{t.savingsPct}%</span>
+                      : <span className="muted">—</span>}
                   </td>
                   <td style={{ ...tdStyle, textAlign: "right" }}>
                     {dollars
@@ -685,7 +854,7 @@ function DoneStage({ project, evaluations, onOpenEval }) {
             Re-runs nightly. Crucible will notify you when a smaller model becomes viable.
           </div>
           <div className="row gap-2">
-            <button className="btn btn-ghost"><Icon name="code" size={14} />Export migration diff</button>
+            <button className="btn btn-ghost" onClick={onDownloadReport}>Download report</button>
             <button className="btn btn-primary">Apply recommendations<Icon name="arrow-right" size={14} /></button>
           </div>
         </div>
