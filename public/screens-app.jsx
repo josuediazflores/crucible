@@ -775,18 +775,6 @@ function Documentation() {
         </div>
 
         <div className="card" style={{ padding: 24 }}>
-          <div className="eyebrow" style={{ marginBottom: 4 }}>Caveats</div>
-          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginBottom: 12 }}>Bias to know about</div>
-          <p style={{ fontSize: 14, lineHeight: 1.6, margin: 0 }}>
-            Every LLM call routes through the ADAL CLI, which injects its own agent persona and a
-            catalog of tool schemas into the model's context. That bias is constant across every
-            challenger, so <em>relative</em> rankings — which model is cheapest while still passing
-            an eval — remain meaningful. Absolute pass rates and savings percentages should be read
-            as estimates, not as guarantees about a customer's own production stack.
-          </p>
-        </div>
-
-        <div className="card" style={{ padding: 24 }}>
           <div className="eyebrow" style={{ marginBottom: 4 }}>Privacy</div>
           <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginBottom: 12 }}>Where your code lives</div>
           <p style={{ fontSize: 14, lineHeight: 1.6, margin: 0 }}>
