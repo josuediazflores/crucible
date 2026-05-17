@@ -33,6 +33,30 @@ function verifyPassword({ email, password }) {
   return { id: u.id, name: u.name, email: u.email, created_at: u.created_at };
 }
 
+function updateProfile(userId, { name, email }) {
+  if (!name || !email) throw new Error('Name and email are required.');
+  const cleanName = String(name).trim();
+  const cleanEmail = String(email).toLowerCase().trim();
+  if (!cleanName) throw new Error('Name cannot be empty.');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error('Invalid email format.');
+  const collision = findUserByEmail(cleanEmail);
+  if (collision && collision.id !== userId) throw new Error('Email already in use.');
+  db.prepare('UPDATE users SET name = ?, email = ? WHERE id = ?').run(cleanName, cleanEmail, userId);
+  const u = db.prepare('SELECT id, name, email, created_at FROM users WHERE id = ?').get(userId);
+  return u;
+}
+
+function changePassword(userId, currentPassword, newPassword) {
+  if (!currentPassword || !newPassword) throw new Error('Current and new password are required.');
+  if (newPassword.length < 6) throw new Error('New password must be at least 6 characters.');
+  const u = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(userId);
+  if (!u) throw new Error('Account not found.');
+  if (!bcrypt.compareSync(currentPassword, u.password_hash)) throw new Error('Current password is incorrect.');
+  const hash = bcrypt.hashSync(newPassword, 10);
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, userId);
+  return true;
+}
+
 function startSession(userId) {
   const token = randomToken();
   const now = Date.now();
@@ -91,7 +115,7 @@ function attachUser(req, _res, next) {
 
 module.exports = {
   COOKIE,
-  createUser, verifyPassword,
+  createUser, verifyPassword, updateProfile, changePassword,
   startSession, destroySession,
   getUserFromToken, setSessionCookie, clearSessionCookie,
   requireAuth, attachUser,

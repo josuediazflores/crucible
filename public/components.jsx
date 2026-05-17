@@ -134,8 +134,18 @@ function Sidebar({ user, active, onNavigate, onLogout }) {
         <div className="eyebrow">Account</div>
       </div>
       <div style={{ padding: "0 12px" }}>
-        <div className="sidebar-link"><Icon name="settings" size={16} />Settings</div>
-        <div className="sidebar-link"><Icon name="help" size={16} />Documentation</div>
+        <div
+          className={"sidebar-link " + (active === "settings" ? "active" : "")}
+          onClick={() => onNavigate("settings")}
+        >
+          <Icon name="settings" size={16} />Settings
+        </div>
+        <div
+          className={"sidebar-link " + (active === "docs" ? "active" : "")}
+          onClick={() => onNavigate("docs")}
+        >
+          <Icon name="help" size={16} />Documentation
+        </div>
       </div>
 
       <div style={{ flex: 1 }} />

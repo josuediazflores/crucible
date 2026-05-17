@@ -564,4 +564,240 @@ function DoneStage({ project, evaluations }) {
   );
 }
 
-Object.assign(window, { Dashboard, RepoDetail });
+/* ----- Settings ----- */
+function Settings({ user, onUserUpdate, onLogout }) {
+  const [name, setName] = useS_d(user?.name || "");
+  const [email, setEmail] = useS_d(user?.email || "");
+  const [profileBusy, setProfileBusy] = useS_d(false);
+  const [profileMsg, setProfileMsg] = useS_d(null);
+  const [profileErr, setProfileErr] = useS_d("");
+
+  const [curPw, setCurPw] = useS_d("");
+  const [newPw, setNewPw] = useS_d("");
+  const [confirmPw, setConfirmPw] = useS_d("");
+  const [pwBusy, setPwBusy] = useS_d(false);
+  const [pwMsg, setPwMsg] = useS_d(null);
+  const [pwErr, setPwErr] = useS_d("");
+
+  const memberSince = user?.created_at
+    ? new Date(user.created_at).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' })
+    : "—";
+
+  async function saveProfile(e) {
+    e.preventDefault();
+    setProfileBusy(true); setProfileErr(""); setProfileMsg(null);
+    try {
+      const res = await api.updateProfile({ name, email });
+      onUserUpdate(res.user);
+      setProfileMsg("Saved");
+      setTimeout(() => setProfileMsg(null), 2000);
+    } catch (e) { setProfileErr(e.message || "Could not save."); }
+    setProfileBusy(false);
+  }
+
+  async function savePassword(e) {
+    e.preventDefault();
+    setPwBusy(true); setPwErr(""); setPwMsg(null);
+    if (newPw !== confirmPw) {
+      setPwErr("New password and confirmation don't match.");
+      setPwBusy(false);
+      return;
+    }
+    try {
+      await api.changePassword({ currentPassword: curPw, newPassword: newPw });
+      setCurPw(""); setNewPw(""); setConfirmPw("");
+      setPwMsg("Password updated");
+      setTimeout(() => setPwMsg(null), 2500);
+    } catch (e) { setPwErr(e.message || "Could not update password."); }
+    setPwBusy(false);
+  }
+
+  return (
+    <div style={{ flex: 1, overflow: "auto", background: "var(--paper)" }}>
+      <div style={{
+        position: "sticky", top: 0, zIndex: 5, background: "var(--paper)",
+        borderBottom: "1px solid var(--hairline)", padding: "16px 36px"
+      }}>
+        <div className="row gap-2 mono" style={{ fontSize: 11, color: "var(--ink-faint)", marginBottom: 10 }}>
+          <span>Account</span>
+          <Icon name="chevron-r" size={11} />
+          <span style={{ color: "var(--ink)" }}>Settings</span>
+        </div>
+        <h1 className="display" style={{ fontSize: 34, margin: 0, letterSpacing: "-0.03em" }}>Settings</h1>
+      </div>
+
+      <div style={{ padding: "28px 36px 60px", display: "grid", gridTemplateColumns: "minmax(0, 640px)", gap: 24 }}>
+        <div className="card" style={{ padding: 24 }}>
+          <div className="eyebrow" style={{ marginBottom: 4 }}>Profile</div>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginBottom: 18 }}>Your account</div>
+          <form onSubmit={saveProfile} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div className="field">
+              <label>Name</label>
+              <input className="input" value={name} onChange={e => setName(e.target.value)} />
+            </div>
+            <div className="field">
+              <label>Email</label>
+              <input className="input" type="email" value={email} onChange={e => setEmail(e.target.value)} />
+            </div>
+            <div className="muted" style={{ fontSize: 12.5, marginTop: 2 }}>
+              Member since {memberSince}
+            </div>
+            {profileErr && <div style={{ color: "var(--fail)", fontSize: 13 }}>{profileErr}</div>}
+            {profileMsg && <div style={{ color: "var(--ember-deep)", fontSize: 13 }}>{profileMsg}</div>}
+            <div>
+              <button className="btn btn-primary" type="submit" disabled={profileBusy}>
+                {profileBusy ? "Saving…" : "Save changes"}
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <div className="card" style={{ padding: 24 }}>
+          <div className="eyebrow" style={{ marginBottom: 4 }}>Security</div>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginBottom: 18 }}>Change password</div>
+          <form onSubmit={savePassword} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div className="field">
+              <label>Current password</label>
+              <input className="input" type="password" value={curPw} onChange={e => setCurPw(e.target.value)} />
+            </div>
+            <div className="field">
+              <label>New password</label>
+              <input className="input" type="password" value={newPw} onChange={e => setNewPw(e.target.value)} />
+            </div>
+            <div className="field">
+              <label>Confirm new password</label>
+              <input className="input" type="password" value={confirmPw} onChange={e => setConfirmPw(e.target.value)} />
+            </div>
+            {pwErr && <div style={{ color: "var(--fail)", fontSize: 13 }}>{pwErr}</div>}
+            {pwMsg && <div style={{ color: "var(--ember-deep)", fontSize: 13 }}>{pwMsg}</div>}
+            <div>
+              <button className="btn btn-primary" type="submit" disabled={pwBusy}>
+                {pwBusy ? "Updating…" : "Update password"}
+              </button>
+            </div>
+          </form>
+        </div>
+
+        <div className="card" style={{ padding: 24 }}>
+          <div className="eyebrow" style={{ marginBottom: 4 }}>Session</div>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginBottom: 8 }}>Sign out</div>
+          <div className="muted" style={{ fontSize: 13, marginBottom: 14 }}>
+            Ends your session on this device. You can sign back in any time.
+          </div>
+          <button className="btn btn-ghost" onClick={onLogout}>
+            <Icon name="logout" size={14} />Sign out
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ----- Documentation ----- */
+function Documentation() {
+  const stages = [
+    { name: "Probing",   text: "Walks each repository, applies pattern-matchers against the source, and records every detected LLM callsite — file, line, provider, model, and a prompt excerpt." },
+    { name: "Forging",   text: "For each callsite, an AI coding agent reads the surrounding code and drafts an evaluation: prompt template, output schema, scoring metric, and 8–12 realistic test cases." },
+    { name: "Tempering", text: "Runs every test case through the current model and each challenger. Claude Opus 4.7 acts as judge, deciding whether each challenger's output is at least as good as the current model's." },
+    { name: "Tempered",  text: "Picks the cheapest challenger whose pass rate clears the quality bar. The winner, its pass rate, and the projected cost savings show up in your dashboard." },
+  ];
+
+  return (
+    <div style={{ flex: 1, overflow: "auto", background: "var(--paper)" }}>
+      <div style={{
+        position: "sticky", top: 0, zIndex: 5, background: "var(--paper)",
+        borderBottom: "1px solid var(--hairline)", padding: "16px 36px"
+      }}>
+        <div className="row gap-2 mono" style={{ fontSize: 11, color: "var(--ink-faint)", marginBottom: 10 }}>
+          <span>Account</span>
+          <Icon name="chevron-r" size={11} />
+          <span style={{ color: "var(--ink)" }}>Documentation</span>
+        </div>
+        <h1 className="display" style={{ fontSize: 34, margin: 0, letterSpacing: "-0.03em" }}>How Crucible works</h1>
+      </div>
+
+      <div style={{ padding: "28px 36px 60px", display: "grid", gridTemplateColumns: "minmax(0, 780px)", gap: 24 }}>
+        <div className="card" style={{ padding: 24 }}>
+          <div className="eyebrow" style={{ marginBottom: 4 }}>Overview</div>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginBottom: 12 }}>What Crucible does</div>
+          <p style={{ fontSize: 14, lineHeight: 1.6, margin: 0 }}>
+            Crucible scans your GitHub repositories for LLM callsites — every place your code calls
+            OpenAI, Anthropic, Google, OpenRouter, LangChain, or a raw HTTP endpoint. For each one,
+            it reverse-engineers an evaluation, runs that eval against a slate of cheaper challenger
+            models, and tells you the cheapest model that still passes — plus the percentage you'd
+            save by switching.
+          </p>
+        </div>
+
+        <div className="card" style={{ padding: 24 }}>
+          <div className="eyebrow" style={{ marginBottom: 4 }}>Pipeline</div>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginBottom: 16 }}>The four stages</div>
+          {stages.map((s, i) => (
+            <div key={s.name} style={{
+              display: "flex", gap: 16,
+              paddingTop: i ? 14 : 0, paddingBottom: i === stages.length - 1 ? 0 : 14,
+              borderTop: i ? "1px solid var(--hairline)" : "none"
+            }}>
+              <div className="mono" style={{ minWidth: 30, color: "var(--ink-faint)", fontSize: 12, paddingTop: 2 }}>{String(i + 1).padStart(2, "0")}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, marginBottom: 4 }}>{s.name}</div>
+                <div style={{ fontSize: 13.5, lineHeight: 1.6, color: "var(--ink-soft)" }}>{s.text}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="card" style={{ padding: 24 }}>
+          <div className="eyebrow" style={{ marginBottom: 4 }}>Results</div>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginBottom: 12 }}>Reading the dashboard</div>
+          <ul style={{ paddingLeft: 18, margin: 0, fontSize: 14, lineHeight: 1.75 }}>
+            <li><strong>Winner</strong> — the cheapest challenger model whose pass rate cleared the quality bar (default 80%).</li>
+            <li><strong>Pass rate</strong> — fraction of test cases the winner passed, per the judge.</li>
+            <li><strong>Savings %</strong> — projected cost reduction vs the current model, based on approximate token counts and published pricing.</li>
+          </ul>
+        </div>
+
+        <div className="card" style={{ padding: 24 }}>
+          <div className="eyebrow" style={{ marginBottom: 4 }}>Configuration</div>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginBottom: 12 }}>Environment variables</div>
+          <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "10px 16px", fontSize: 13.5, lineHeight: 1.5 }}>
+            <code className="mono" style={{ whiteSpace: "nowrap" }}>ADAL_CMD</code>
+            <div>Path to the <code className="mono">adal</code> binary. Default: <code className="mono">adal</code>.</div>
+            <code className="mono" style={{ whiteSpace: "nowrap" }}>ADAL_CONCURRENCY</code>
+            <div>Max concurrent <code className="mono">adal -q</code> subprocesses. Default <code className="mono">1</code>; bump cautiously.</div>
+            <code className="mono" style={{ whiteSpace: "nowrap" }}>JUDGE_MODEL</code>
+            <div>ADAL catalog key used as the judge. Default <code className="mono">anthropic-claude-opus-4-7</code>.</div>
+            <code className="mono" style={{ whiteSpace: "nowrap" }}>FORGER_MODEL</code>
+            <div>ADAL catalog key for eval drafting. Default <code className="mono">anthropic-claude-sonnet-4-6</code>.</div>
+            <code className="mono" style={{ whiteSpace: "nowrap" }}>CHALLENGER_MODELS</code>
+            <div>Comma-separated ADAL catalog keys to benchmark.</div>
+          </div>
+        </div>
+
+        <div className="card" style={{ padding: 24 }}>
+          <div className="eyebrow" style={{ marginBottom: 4 }}>Caveats</div>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginBottom: 12 }}>Bias to know about</div>
+          <p style={{ fontSize: 14, lineHeight: 1.6, margin: 0 }}>
+            Every LLM call routes through the ADAL CLI, which injects its own agent persona and a
+            catalog of tool schemas into the model's context. That bias is constant across every
+            challenger, so <em>relative</em> rankings — which model is cheapest while still passing
+            an eval — remain meaningful. Absolute pass rates and savings percentages should be read
+            as estimates, not as guarantees about a customer's own production stack.
+          </p>
+        </div>
+
+        <div className="card" style={{ padding: 24 }}>
+          <div className="eyebrow" style={{ marginBottom: 4 }}>Privacy</div>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginBottom: 12 }}>Where your code lives</div>
+          <p style={{ fontSize: 14, lineHeight: 1.6, margin: 0 }}>
+            Crucible runs entirely on your machine. Repository clones, evaluations, and run results
+            are stored in a local SQLite database. Nothing is uploaded anywhere except the prompts
+            sent to your configured AI providers via the ADAL CLI.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { Dashboard, RepoDetail, Settings, Documentation });

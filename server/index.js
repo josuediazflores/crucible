@@ -5,7 +5,8 @@ const path = require('path');
 const crypto = require('crypto');
 const db = require('./db');
 const {
-  createUser, verifyPassword, startSession, destroySession,
+  createUser, verifyPassword, updateProfile, changePassword,
+  startSession, destroySession,
   setSessionCookie, clearSessionCookie, requireAuth, attachUser, COOKIE
 } = require('./auth');
 const gh = require('./github');
@@ -55,6 +56,22 @@ app.post('/api/auth/signout', requireAuth, (req, res) => {
   destroySession(req.sessionToken);
   clearSessionCookie(res);
   res.json({ ok: true });
+});
+
+// ---- API: user profile ----------------------------------------------------
+app.patch('/api/user', requireAuth, (req, res) => {
+  try {
+    const updated = updateProfile(req.user.id, req.body || {});
+    res.json({ ok: true, user: updated });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.post('/api/user/password', requireAuth, (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body || {};
+    changePassword(req.user.id, currentPassword, newPassword);
+    res.json({ ok: true });
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 // ---- API: github ----------------------------------------------------------

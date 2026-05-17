@@ -20,6 +20,8 @@ const api = {
   signup(payload)               { return api._json('/api/auth/signup', { method: 'POST', body: JSON.stringify(payload) }); },
   signin(payload)               { return api._json('/api/auth/signin', { method: 'POST', body: JSON.stringify(payload) }); },
   signout()                     { return api._json('/api/auth/signout', { method: 'POST' }); },
+  updateProfile(payload)        { return api._json('/api/user', { method: 'PATCH', body: JSON.stringify(payload) }); },
+  changePassword(payload)       { return api._json('/api/user/password', { method: 'POST', body: JSON.stringify(payload) }); },
   githubStatus()                { return api._json('/api/github/status'); },
   githubStart()                 { return api._json('/api/github/start'); },
   githubDemo()                  { return api._json('/api/github/demo', { method: 'POST' }); },

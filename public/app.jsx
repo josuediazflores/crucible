@@ -75,8 +75,8 @@ function App() {
     <div style={{ display: "flex", height: "100%" }}>
       <Sidebar
         user={user}
-        active={"dashboard"}
-        onNavigate={() => setRoute("dashboard")}
+        active={route}
+        onNavigate={(r) => setRoute(r)}
         onLogout={handleLogout}
       />
       {route === "dashboard" && (
@@ -91,6 +91,10 @@ function App() {
       {route === "detail" && openId && (
         <RepoDetail projectId={openId} onBack={() => setRoute("dashboard")} />
       )}
+      {route === "settings" && (
+        <Settings user={user} onUserUpdate={setUser} onLogout={handleLogout} />
+      )}
+      {route === "docs" && <Documentation />}
     </div>
   );
 }
