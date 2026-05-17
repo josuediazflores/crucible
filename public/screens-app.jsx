@@ -493,10 +493,123 @@ const thStyle = { textAlign: "left", padding: "12px 20px", fontSize: 11, fontFam
 const tdStyle = { padding: "14px 20px", verticalAlign: "top" };
 
 /* ----- Stage 4: Done ----- */
+/* Compute per-eval, per-call savings in USD using results.current_total_cost
+   and results.winner_total_cost (already stored by tempering.js). Returns null
+   when the data is missing or non-positive. */
+function perEvalSaved(e) {
+  const r = e?.results;
+  if (!r) return null;
+  const n = e.testCount || 0;
+  if (!n) return null;
+  const cur = Number(r.current_total_cost) || 0;
+  const win = Number(r.winner_total_cost) || 0;
+  if (cur <= 0) return null;          // can't project off zero baseline
+  const perCall = (cur - win) / n;
+  if (perCall <= 0) return 0;          // winner not actually cheaper
+  return perCall;
+}
+
+function formatUSD(n) {
+  if (!isFinite(n) || n <= 0) return '$0';
+  if (n >= 1_000_000) return '$' + (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (n >= 10_000) return '$' + Math.round(n / 1000) + 'K';
+  if (n >= 1) return '$' + Math.round(n).toLocaleString();
+  return '$' + n.toFixed(2);
+}
+
+function CostProjection({ evaluations, monthly, setMonthly }) {
+  const projectables = evaluations.filter(e => perEvalSaved(e) !== null);
+  if (!projectables.length) return null;
+
+  const evalCount = projectables.length;
+  const perEvalCalls = Math.max(0, Math.floor((monthly || 0) / evalCount));
+  const savedPerMonth = projectables.reduce((acc, e) => acc + (perEvalSaved(e) || 0) * perEvalCalls, 0);
+  const currentPerMonth = projectables.reduce((acc, e) => {
+    const r = e.results || {};
+    const cur = Number(r.current_total_cost) || 0;
+    return acc + (cur / (e.testCount || 1)) * perEvalCalls;
+  }, 0);
+  const pctReclaimed = currentPerMonth > 0 ? Math.round((savedPerMonth / currentPerMonth) * 100) : 0;
+
+  const presets = [1_000, 10_000, 100_000, 1_000_000, 10_000_000];
+
+  return (
+    <div className="card" style={{ padding: 0 }}>
+      <div style={{ padding: "20px 24px 16px", borderBottom: "1px solid var(--hairline)" }}>
+        <div className="eyebrow">Projection</div>
+        <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18, marginTop: 4 }}>What this saves you</div>
+        <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
+          Based on measured tokens × public list pricing. Estimate, not invoice.
+        </div>
+      </div>
+
+      <div style={{ padding: "20px 24px", borderBottom: "1px solid var(--hairline)" }}>
+        <div className="row" style={{ alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 14 }}>If this code handles</span>
+          <input
+            className="input"
+            type="number"
+            min={0}
+            step={1000}
+            value={monthly}
+            onChange={e => setMonthly(Math.max(0, Number(e.target.value) || 0))}
+            style={{ width: 180, fontSize: 18, fontFamily: "var(--font-display)", fontWeight: 900, borderBottom: "2px solid var(--ink)", padding: "6px 0" }}
+          />
+          <span style={{ fontSize: 14 }}>requests / month…</span>
+        </div>
+        <div className="row gap-2" style={{ marginTop: 12, flexWrap: "wrap" }}>
+          {presets.map(p => (
+            <button
+              key={p}
+              className={"chip"}
+              onClick={() => setMonthly(p)}
+              style={{
+                cursor: "pointer",
+                background: monthly === p ? "var(--ink)" : "transparent",
+                color: monthly === p ? "var(--paper)" : "var(--ink-muted)",
+                border: "1px solid " + (monthly === p ? "var(--ink)" : "var(--hairline)"),
+                padding: "6px 12px",
+                fontSize: 11,
+              }}
+            >
+              {p >= 1_000_000 ? (p / 1_000_000) + 'M' : (p / 1000) + 'K'}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr" }}>
+        <div style={{ padding: "24px 24px", borderRight: "1px solid var(--hairline)" }}>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 42, lineHeight: 1, color: "var(--ember)" }}>
+            {formatUSD(savedPerMonth)}
+          </div>
+          <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>saved per month</div>
+        </div>
+        <div style={{ padding: "24px 24px", borderRight: "1px solid var(--hairline)" }}>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 42, lineHeight: 1 }}>
+            {formatUSD(savedPerMonth * 12)}
+          </div>
+          <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>annualized</div>
+        </div>
+        <div style={{ padding: "24px 24px" }}>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 42, lineHeight: 1 }}>
+            {pctReclaimed}%
+          </div>
+          <div className="muted" style={{ fontSize: 12.5, marginTop: 6 }}>spend reclaimed</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function DoneStage({ project, evaluations }) {
   const evals = evaluations || [];
   const passing = evals.filter(e => (e.savingsPct || 0) > 0);
   const avg = passing.length ? Math.round(passing.reduce((a,e)=>a+(e.savingsPct||0),0) / passing.length) : 0;
+
+  const [monthly, setMonthly] = useS_d(1_000_000);
+  const evalCount = evals.filter(e => perEvalSaved(e) !== null).length || 1;
+  const perEvalCalls = Math.floor(monthly / evalCount);
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 24 }}>
@@ -511,6 +624,8 @@ function DoneStage({ project, evaluations }) {
         </div>
       </div>
 
+      <CostProjection evaluations={evals} monthly={monthly} setMonthly={setMonthly} />
+
       <div className="card" style={{ padding: 0 }}>
         <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--hairline)" }}>
           <div className="eyebrow">Results</div>
@@ -524,30 +639,40 @@ function DoneStage({ project, evaluations }) {
               <th style={thStyle}>Winner</th>
               <th style={thStyle}>Pass rate</th>
               <th style={{ ...thStyle, textAlign: "right" }}>Savings</th>
+              <th style={{ ...thStyle, textAlign: "right" }} title="At the volume above">$ / month</th>
             </tr>
           </thead>
           <tbody>
-            {evals.map((e, i) => (
-              <tr key={e.id} style={{ borderBottom: i < evals.length - 1 ? "1px solid var(--hairline)" : "none" }}>
-                <td style={tdStyle}>
-                  <div style={{ fontWeight: 500 }}>{e.title}</div>
-                  <div className="mono faint" style={{ fontSize: 11 }}>{e.callsite}</div>
-                </td>
-                <td style={tdStyle}><span className="mono">{e.currentModel}</span></td>
-                <td style={tdStyle}>
-                  <span className="mono" style={{ color: "var(--ember-deep)", fontWeight: 500 }}>{e.winner || '—'}</span>
-                </td>
-                <td style={tdStyle}>
-                  <div className="row gap-2">
-                    <span style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18 }}>{e.passRate ?? '—'}%</span>
-                    {e.passRate >= 80 && <span className="chip pass" style={{ fontSize: 10 }}>pass</span>}
-                  </div>
-                </td>
-                <td style={{ ...tdStyle, textAlign: "right" }}>
-                  <span style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 22, color: "var(--ember)" }}>−{e.savingsPct || 0}%</span>
-                </td>
-              </tr>
-            ))}
+            {evals.map((e, i) => {
+              const saved = perEvalSaved(e);
+              const dollars = saved !== null && saved > 0 ? saved * perEvalCalls : null;
+              return (
+                <tr key={e.id} style={{ borderBottom: i < evals.length - 1 ? "1px solid var(--hairline)" : "none" }}>
+                  <td style={tdStyle}>
+                    <div style={{ fontWeight: 500 }}>{e.title}</div>
+                    <div className="mono faint" style={{ fontSize: 11 }}>{e.callsite}</div>
+                  </td>
+                  <td style={tdStyle}><span className="mono">{e.currentModel}</span></td>
+                  <td style={tdStyle}>
+                    <span className="mono" style={{ color: "var(--ember-deep)", fontWeight: 500 }}>{e.winner || '—'}</span>
+                  </td>
+                  <td style={tdStyle}>
+                    <div className="row gap-2">
+                      <span style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18 }}>{e.passRate ?? '—'}%</span>
+                      {e.passRate >= 80 && <span className="chip pass" style={{ fontSize: 10 }}>pass</span>}
+                    </div>
+                  </td>
+                  <td style={{ ...tdStyle, textAlign: "right" }}>
+                    <span style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 22, color: "var(--ember)" }}>−{e.savingsPct || 0}%</span>
+                  </td>
+                  <td style={{ ...tdStyle, textAlign: "right" }}>
+                    {dollars
+                      ? <span style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 18 }}>{formatUSD(dollars)}</span>
+                      : <span className="muted">—</span>}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
         <div style={{ padding: "14px 20px", borderTop: "1px solid var(--hairline)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>

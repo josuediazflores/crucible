@@ -14,7 +14,7 @@ const { runAdal, runAdalJson, resolveAdalKey } = require('./adal');
 const JUDGE_MODEL = process.env.JUDGE_MODEL || 'anthropic-claude-opus-4-7';
 const QUALITY_BAR = Number(process.env.QUALITY_BAR || 80);   // % pass needed to be a viable winner
 
-// Cents per 1M tokens (rough, public list — kept here for *relative* savings math).
+// USD per 1M tokens (rough, public list — kept here for *relative* savings math).
 const MODEL_PRICING = {
   // Current models (the ones found in code)
   'gpt-4o':                       { in: 2.50,  out: 10.00 },

@@ -205,6 +205,10 @@ function rowToProject(p) {
   };
 }
 function rowToEval(e) {
+  let results = null;
+  if (e.results_json) {
+    try { results = JSON.parse(e.results_json); } catch (_) {}
+  }
   return {
     id: e.id,
     title: e.title,
@@ -219,6 +223,7 @@ function rowToEval(e) {
     winner: e.winner,
     passRate: e.pass_rate,
     savingsPct: e.savings_pct,
+    results,
   };
 }
 
