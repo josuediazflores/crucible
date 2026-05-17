@@ -267,7 +267,7 @@ function RepoDetail({ projectId, onBack, onOpenEval }) {
         {project.stage === 0 && <ProbeStage project={project} events={data.events} />}
         {project.stage === 1 && <ForgeStage project={project} evaluations={data.evaluations} />}
         {project.stage === 2 && <TemperStage project={project} evaluations={data.evaluations} />}
-        {project.stage >= 3 && <DoneStage project={project} evaluations={data.evaluations} onOpenEval={onOpenEval} />}
+        {project.stage >= 3 && <DoneStage project={project} evaluations={data.evaluations} callsites={data.callsites} onOpenEval={onOpenEval} />}
       </div>
     </div>
   );
@@ -683,7 +683,166 @@ function CostProjection({ evaluations, monthly, setMonthly, qualityBar, setQuali
 }
 
 /* Build a Markdown report from the current threshold-aware view. */
-function generateReport(project, evals, qualityBar, monthly) {
+/* ----- Markdown report generation -----
+   We pull from two endpoints when generating: /api/projects/:id already
+   has the eval summaries and project metadata, but per-test-case
+   examples (input, current output, challenger output, judge_reason)
+   live in /api/evaluations/:id. We fetch the latter in parallel for
+   eligible evals only. */
+
+function truncate(s, max) {
+  if (!s) return '';
+  if (s.length <= max) return s;
+  return s.slice(0, max) + '\n[...]';
+}
+
+function fence(text) {
+  // Markdown safe code fence. If the text contains a triple backtick
+  // sequence we bump the fence count.
+  const t = String(text == null ? '' : text);
+  let backs = '```';
+  while (t.includes(backs)) backs += '`';
+  return backs + '\n' + t + '\n' + backs;
+}
+
+function describeInput(inputJson) {
+  let obj = null;
+  try { obj = JSON.parse(inputJson || '{}'); } catch { obj = { raw: inputJson }; }
+  if (typeof obj.user_message === 'string') return obj.user_message;
+  return JSON.stringify(obj, null, 2);
+}
+
+/* Group an eval's model_runs by test_case_id and tag the current row
+   (passed === null) separately from the challenger rows. */
+function groupRuns(model_runs) {
+  const byTc = {};
+  for (const r of model_runs || []) {
+    if (!byTc[r.test_case_id]) byTc[r.test_case_id] = { current: null, challengers: [] };
+    if (r.passed === null) byTc[r.test_case_id].current = r;
+    else byTc[r.test_case_id].challengers.push(r);
+  }
+  return byTc;
+}
+
+/* Pick one passing case (the longest answer, since long answers carry
+   more signal) and one failing case (the first one). Either or both can
+   be null if there aren't any of that kind. We pin to the recommended
+   winner model from the threshold-aware selection. */
+function pickExampleCases(detail, winnerModel) {
+  if (!detail || !detail.test_cases || !detail.model_runs) return { pass: null, fail: null };
+  const byTc = groupRuns(detail.model_runs);
+  let pass = null, passLen = -1, fail = null;
+  for (const tc of detail.test_cases) {
+    const g = byTc[tc.id];
+    if (!g) continue;
+    const winnerRun = (g.challengers || []).find(r => r.model === winnerModel);
+    if (!winnerRun) continue;
+    if (winnerRun.passed === 1) {
+      const len = (winnerRun.output || '').length;
+      if (len > passLen) { passLen = len; pass = { tc, current: g.current, challenger: winnerRun }; }
+    } else if (winnerRun.passed === 0 && !fail) {
+      fail = { tc, current: g.current, challenger: winnerRun };
+    }
+  }
+  return { pass, fail };
+}
+
+/* Counts of passing and failing test cases for a given challenger
+   within one eval, for the "X of Y" line in the recommendation. */
+function passCounts(detail, winnerModel) {
+  if (!detail || !detail.model_runs) return { pass: 0, total: 0 };
+  let pass = 0, total = 0;
+  for (const r of detail.model_runs) {
+    if (r.model !== winnerModel) continue;
+    if (r.passed === 1) pass += 1;
+    if (r.passed === 0 || r.passed === 1) total += 1;
+  }
+  return { pass, total };
+}
+
+/* Fetch full details for every eligible eval in parallel. Skipped evals
+   stay summary only because the failure modes are usually not what the
+   reader wants to dig into. */
+async function fetchEligibleDetails(eligible) {
+  const out = {};
+  await Promise.all(eligible.map(async ({ e }) => {
+    try { out[e.id] = await api.evaluation(e.id); }
+    catch (_) { out[e.id] = null; }
+  }));
+  return out;
+}
+
+function renderRecommendationBlock(idx, row, perEvalCalls, detail) {
+  const { e, t } = row;
+  let md = '';
+  const cs = e.callsite || '';
+  const counts = passCounts(detail, t.winner);
+  const monthlyDollar = formatUSD(t.savedPerCall * perEvalCalls);
+  const yearlyDollar = formatUSD(t.savedPerCall * perEvalCalls * 12);
+
+  md += `### ${idx}. ${e.title}\n\n`;
+  md += `- **Callsite**: \`${cs}\`\n`;
+  md += `- **Metric**: ${e.metric || 'llm-judge'}\n`;
+  md += `- **Current model**: \`${e.currentModel}\`\n`;
+  md += `- **Recommended model**: \`${t.winner}\`\n`;
+  if (counts.total > 0) {
+    md += `- **Pass rate**: ${t.passRate}% (${counts.pass} of ${counts.total} test cases)\n`;
+  } else {
+    md += `- **Pass rate**: ${t.passRate}%\n`;
+  }
+  md += `- **Cost reduction per call**: ${t.savingsPct}%\n`;
+  md += `- **Projected savings at this volume**: ${monthlyDollar} per month, ${yearlyDollar} per year\n\n`;
+
+  if (!detail) {
+    md += `_Detailed test case data was not available when this report was generated._\n\n`;
+    return md;
+  }
+
+  const { pass, fail } = pickExampleCases(detail, t.winner);
+
+  if (pass) {
+    md += `#### Example: passing test case (case ${pass.tc.idx + 1})\n\n`;
+    md += `**Input**\n\n${fence(describeInput(pass.tc.input_json))}\n\n`;
+    if (pass.current) {
+      md += `**Current model output** (\`${pass.current.model}\`)\n\n${fence(truncate(pass.current.output || '[empty]', 600))}\n\n`;
+    }
+    md += `**Recommended model output** (\`${pass.challenger.model}\`)\n\n${fence(truncate(pass.challenger.output || '[empty]', 600))}\n\n`;
+    if (pass.challenger.judge_reason) {
+      md += `> Judge verdict (PASS): ${pass.challenger.judge_reason}\n\n`;
+    }
+  }
+
+  if (fail) {
+    md += `#### Example: failing test case (case ${fail.tc.idx + 1})\n\n`;
+    md += `**Input**\n\n${fence(describeInput(fail.tc.input_json))}\n\n`;
+    if (fail.current) {
+      md += `**Current model output** (\`${fail.current.model}\`)\n\n${fence(truncate(fail.current.output || '[empty]', 600))}\n\n`;
+    }
+    md += `**Recommended model output** (\`${fail.challenger.model}\`)\n\n${fence(truncate(fail.challenger.output || '[empty]', 600))}\n\n`;
+    if (fail.challenger.judge_reason) {
+      md += `> Judge verdict (FAIL): ${fail.challenger.judge_reason}\n\n`;
+    }
+    md += `Failing cases are the credibility test for any auto migration. Read this verdict carefully before flipping the model in production.\n\n`;
+  }
+
+  // Full per challenger table from results.per_challenger
+  const perChallenger = e.results && e.results.per_challenger;
+  if (perChallenger && Object.keys(perChallenger).length > 0) {
+    md += `#### All challengers benchmarked on this callsite\n\n`;
+    md += `| Model | Pass rate | Test set cost (USD) |\n`;
+    md += `|---|---:|---:|\n`;
+    const sorted = Object.entries(perChallenger).sort((a, b) => (b[1].pass_rate || 0) - (a[1].pass_rate || 0));
+    for (const [model, info] of sorted) {
+      const mark = model === t.winner ? ' (recommended)' : '';
+      md += `| \`${model}\`${mark} | ${info.pass_rate || 0}% | $${Number(info.total_cost || 0).toFixed(5)} |\n`;
+    }
+    md += `\n`;
+  }
+
+  return md;
+}
+
+async function generateReport(project, evals, qualityBar, monthly, callsites = []) {
   const dateStr = new Date().toISOString().slice(0, 10);
   const rows = evals.map(e => ({ e, t: evalAtThreshold(e, qualityBar) }));
   const projectables = rows.filter(({ t }) => t.currentPerCall > 0);
@@ -693,46 +852,105 @@ function generateReport(project, evals, qualityBar, monthly) {
   const totalMonthly = eligible.reduce((a, r) => a + r.t.savedPerCall * perEvalCalls, 0);
   const totalCurrent = projectables.reduce((a, r) => a + r.t.currentPerCall * perEvalCalls, 0);
   const pctReclaimed = totalCurrent > 0 ? Math.round((totalMonthly / totalCurrent) * 100) : 0;
+  const details = await fetchEligibleDetails(eligible);
 
-  let md = `# Crucible Report — ${project.fullName || project.name}\n\n`;
-  md += `Generated ${dateStr} · quality bar = ${qualityBar}% · volume = ${(monthly || 0).toLocaleString()} req/month\n\n`;
-  md += `## Summary\n\n`;
-  md += `- **${eligible.length} of ${evals.length} callsites** qualify for migration at ≥${qualityBar}% pass rate.\n`;
-  md += `- **Projected savings**: ${formatUSD(totalMonthly)} / month, ${formatUSD(totalMonthly * 12)} / year.\n`;
-  md += `- **Spend reclaimed**: ${pctReclaimed}%.\n\n`;
+  // Provider breakdown from callsites
+  const providerCount = {};
+  for (const c of callsites || []) {
+    const p = c.provider || 'unknown';
+    providerCount[p] = (providerCount[p] || 0) + 1;
+  }
+
+  const fullName = project.fullName || `${project.owner || ''}/${project.name || ''}`.replace(/^\//, '');
+  const repoUrl = `https://github.com/${fullName}`;
+
+  let md = `# Crucible Report\n\n`;
+  md += `**Project**: ${fullName}\n`;
+  md += `**Generated**: ${dateStr}\n`;
+  md += `**Quality bar**: ${qualityBar}% pass rate\n`;
+  md += `**Volume assumption**: ${(monthly || 0).toLocaleString()} requests per month, distributed evenly across all callsites\n\n`;
+
+  md += `## At a glance\n\n`;
+  md += `- **${eligible.length} of ${evals.length} callsites** qualify for migration at the current quality bar.\n`;
+  md += `- **Projected savings**: ${formatUSD(totalMonthly)} per month, ${formatUSD(totalMonthly * 12)} per year.\n`;
+  md += `- **Spend reclaimed**: ${pctReclaimed}% of the projected current spend on these callsites.\n`;
+  md += `- **Methodology**: see the section at the bottom of this report.\n\n`;
+
+  md += `## Source\n\n`;
+  md += `- **Repository**: [${fullName}](${repoUrl})\n`;
+  if (project.defaultBranch) md += `- **Default branch**: ${project.defaultBranch}\n`;
+  if (project.lang) md += `- **Language**: ${project.lang}\n`;
+  if (project.findings) {
+    if (typeof project.findings.files === 'number') md += `- **Files scanned**: ${project.findings.files}\n`;
+    if (typeof project.findings.aiCalls === 'number') md += `- **LLM callsites found**: ${project.findings.aiCalls}\n`;
+    if (typeof project.findings.models === 'number') md += `- **Unique models detected**: ${project.findings.models}\n`;
+  }
+  if (Object.keys(providerCount).length) {
+    const providerLine = Object.entries(providerCount)
+      .sort((a, b) => b[1] - a[1])
+      .map(([p, n]) => `${p} (${n})`)
+      .join(', ');
+    md += `- **Providers in this codebase**: ${providerLine}\n`;
+  }
+  md += `\n`;
 
   if (eligible.length === 0) {
-    md += `_No callsites meet the threshold at this quality bar. Lower the bar or add more challenger models in \`CHALLENGER_MODELS\`._\n\n`;
+    md += `## Recommendations\n\nNo callsites meet the threshold at this quality bar. Lower the bar or add more challenger models via the \`CHALLENGER_MODELS\` env var.\n\n`;
   } else {
     md += `## Recommendations\n\n`;
-    eligible.forEach((r, i) => {
-      const { e, t } = r;
-      const monthlyDollar = formatUSD(t.savedPerCall * perEvalCalls);
-      md += `### ${i + 1}. ${e.title}\n\n`;
-      md += `- **Location**: \`${e.callsite}\`\n`;
-      md += `- **Current**: \`${e.currentModel}\`\n`;
-      md += `- **Recommended**: \`${t.winner}\`\n`;
-      md += `- **Pass rate**: ${t.passRate}%\n`;
-      md += `- **Cost reduction**: ${t.savingsPct}%\n`;
-      md += `- **Projected at this volume**: ${monthlyDollar} / month\n\n`;
+    eligible.forEach((row, i) => {
+      md += renderRecommendationBlock(i + 1, row, perEvalCalls, details[row.e.id]);
+    });
+  }
+
+  // Suggested code changes (conceptual diff)
+  if (eligible.length > 0) {
+    md += `## Suggested code changes\n\n`;
+    md += `For each callsite, the migration is usually a single string change. The exact syntax depends on how your code references the model. Open each file at the indicated line and swap the identifier.\n\n`;
+    eligible.forEach((row, i) => {
+      const { e, t } = row;
+      md += `**${i + 1}. \`${e.callsite}\`**\n\n`;
+      md += '```diff\n';
+      md += `- model: "${e.currentModel}"\n`;
+      md += `+ model: "${t.winner}"\n`;
+      md += '```\n\n';
     });
   }
 
   const skipped = projectables.filter(r => !(r.t.meetsBar && r.t.savedPerCall > 0));
-  if (skipped.length) {
-    md += `## Skipped\n\n`;
+  const unprojectable = rows.filter(r => !(r.t.currentPerCall > 0));
+  if (skipped.length || unprojectable.length) {
+    md += `## Callsites not migrated\n\n`;
     skipped.forEach(r => {
       const reason = !r.t.meetsBar
-        ? `pass rate ${r.t.passRate ?? '—'}% is below the ${qualityBar}% bar`
-        : `no cost reduction available with current challengers`;
-      md += `- **${r.e.title}** \`${r.e.callsite}\` — ${reason}.\n`;
+        ? `pass rate ${r.t.passRate == null ? 'n/a' : r.t.passRate + '%'} is below the ${qualityBar}% bar`
+        : `no cost reduction available with the current challenger slate`;
+      md += `- **${r.e.title}** \`${r.e.callsite}\`. Reason: ${reason}.\n`;
+    });
+    unprojectable.forEach(r => {
+      md += `- **${r.e.title}** \`${r.e.callsite}\`. Reason: insufficient cost data, callsite was likely run in demo mode or against an embedding model with no ADAL counterpart.\n`;
     });
     md += `\n`;
   }
 
+  md += `## Methodology\n\n`;
+  md += `Each LLM callsite in the repository was reverse engineered into a self contained evaluation. For every callsite we extracted a prompt template, an output format, a scoring metric, and a set of representative test cases (typically 8 to 12 per callsite).\n\n`;
+  md += `Every test case was then run against the original model and a slate of cheaper challenger models. All inference and judging happens through the ADAL CLI by SylphAI. Claude Opus 4.7 acts as the judge. For each challenger output, the judge returns a pass or fail decision and a short reason.\n\n`;
+  md += `Pass rate is the percentage of test cases where the judge ruled that the challenger output was at least as good as the original. The recommendation is the cheapest challenger whose pass rate meets the configured quality bar. If no challenger clears the bar, the report excludes that callsite from the migration set.\n\n`;
+
+  md += `## Cost methodology details\n\n`;
+  md += `Cost numbers in this report come from real model runs stored in the local SQLite database. They use measured token counts multiplied by public list pricing for each provider (see the MODEL_PRICING table in \`server/tempering.js\`). Token counts are approximated with a four characters per token rule because the ADAL CLI does not return real tokenizer counts in headless mode. The approximation can be off by 20 to 30 percent versus the model's real tokenizer.\n\n`;
+  md += `Volume is distributed evenly across all projectable callsites in this codebase. If your real traffic is concentrated on a few endpoints, the per callsite savings will skew accordingly. Use the per callsite Projected savings line above as a unit number and multiply by your real traffic for that specific callsite.\n\n`;
+  md += `Public list pricing does not include enterprise discounts, prompt caching credits, or batch API discounts. If your contract includes any of those, treat the headline savings figure as a lower bound on the relative reduction and adjust the absolute number downward.\n\n`;
+
+  md += `## Limitations\n\n`;
+  md += `- The ADAL CLI inserts a constant agent persona and a catalog of tool schemas into every call. This bias applies uniformly across all challengers in this report, so relative rankings between challengers are meaningful. Absolute pass rates may be slightly different against your raw production stack where this overhead does not exist.\n`;
+  md += `- Forging quality varies. If the test cases the forger drafted do not capture your real edge cases, the recommendation may be overconfident. Open the per eval drill in view to spot check the test cases before acting on the recommendation.\n`;
+  md += `- The judge is itself an LLM. It can be wrong. For high stakes callsites, sample a handful of failing cases manually before flipping the model.\n`;
+  md += `- This is a static snapshot. Provider pricing and model availability change. Re run Crucible periodically against the same repository to catch new opportunities and check that prior recommendations still hold.\n\n`;
+
   md += `---\n\n`;
-  md += `_Methodology: each callsite was reverse-engineered into a set of representative test cases. Every test was run against the current model and each challenger via the ADAL CLI; Claude Opus 4.7 served as the judge. Pass rate is the fraction of cases the challenger matched in quality. Cost estimates use measured tokens × public list pricing — for planning, not invoicing._\n\n`;
-  md += `_Generated by [Crucible](https://github.com/josuediazflores/crucible)._\n`;
+  md += `_Generated by [Crucible](https://github.com/josuediazflores/crucible). Not affiliated with the model providers it benchmarks._\n`;
   return md;
 }
 
@@ -745,11 +963,12 @@ function downloadText(text, filename, mime = 'text/markdown;charset=utf-8') {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function DoneStage({ project, evaluations, onOpenEval }) {
+function DoneStage({ project, evaluations, callsites, onOpenEval }) {
   const evals = evaluations || [];
 
   const [monthly, setMonthly] = useS_d(1_000_000);
   const [qualityBar, setQualityBar] = useS_d(80);
+  const [reportBusy, setReportBusy] = useS_d(false);
 
   const rows = evals.map(e => ({ e, t: evalAtThreshold(e, qualityBar) }));
   const projectables = rows.filter(({ t }) => t.currentPerCall > 0);
@@ -762,10 +981,20 @@ function DoneStage({ project, evaluations, onOpenEval }) {
     ? Math.round(eligible.reduce((a, r) => a + r.t.savingsPct, 0) / eligible.length)
     : 0;
 
-  const onDownloadReport = () => {
-    const safeName = String(project.name || 'project').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const filename = `crucible-${safeName}-${qualityBar}pct.md`;
-    downloadText(generateReport(project, evals, qualityBar, monthly), filename);
+  const onDownloadReport = async () => {
+    if (reportBusy) return;
+    setReportBusy(true);
+    try {
+      const safeName = String(project.name || 'project').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const filename = `crucible-${safeName}-${qualityBar}pct.md`;
+      const md = await generateReport(project, evals, qualityBar, monthly, callsites || []);
+      downloadText(md, filename);
+    } catch (err) {
+      console.error('[report] failed:', err);
+      alert('Could not generate report: ' + (err.message || err));
+    } finally {
+      setReportBusy(false);
+    }
   };
 
   return (
@@ -854,7 +1083,9 @@ function DoneStage({ project, evaluations, onOpenEval }) {
             Re-runs nightly. Crucible will notify you when a smaller model becomes viable.
           </div>
           <div className="row gap-2">
-            <button className="btn btn-ghost" onClick={onDownloadReport}>Download report</button>
+            <button className="btn btn-ghost" onClick={onDownloadReport} disabled={reportBusy}>
+              {reportBusy ? 'Building report…' : 'Download report'}
+            </button>
             <button className="btn btn-primary">Apply recommendations<Icon name="arrow-right" size={14} /></button>
           </div>
         </div>
