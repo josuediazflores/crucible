@@ -29,6 +29,7 @@ const api = {
   projects()                    { return api._json('/api/projects'); },
   importProjects(repos)         { return api._json('/api/projects', { method: 'POST', body: JSON.stringify({ repos }) }); },
   project(id)                   { return api._json(`/api/projects/${encodeURIComponent(id)}`); },
+  evaluation(id)                { return api._json(`/api/evaluations/${encodeURIComponent(id)}`); },
   rescan(id)                    { return api._json(`/api/projects/${encodeURIComponent(id)}/rescan`, { method: 'POST' }); },
 };
 

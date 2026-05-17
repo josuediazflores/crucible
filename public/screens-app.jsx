@@ -193,7 +193,7 @@ function RepoRow({ project, onOpen }) {
 }
 
 /* ============ Repo Detail ============ */
-function RepoDetail({ projectId, onBack }) {
+function RepoDetail({ projectId, onBack, onOpenEval }) {
   const [data, setData] = useS_d(null);
   const [err, setErr] = useS_d("");
 
@@ -267,7 +267,7 @@ function RepoDetail({ projectId, onBack }) {
         {project.stage === 0 && <ProbeStage project={project} events={data.events} />}
         {project.stage === 1 && <ForgeStage project={project} evaluations={data.evaluations} />}
         {project.stage === 2 && <TemperStage project={project} evaluations={data.evaluations} />}
-        {project.stage >= 3 && <DoneStage project={project} evaluations={data.evaluations} />}
+        {project.stage >= 3 && <DoneStage project={project} evaluations={data.evaluations} onOpenEval={onOpenEval} />}
       </div>
     </div>
   );
@@ -602,7 +602,7 @@ function CostProjection({ evaluations, monthly, setMonthly }) {
   );
 }
 
-function DoneStage({ project, evaluations }) {
+function DoneStage({ project, evaluations, onOpenEval }) {
   const evals = evaluations || [];
   const passing = evals.filter(e => (e.savingsPct || 0) > 0);
   const avg = passing.length ? Math.round(passing.reduce((a,e)=>a+(e.savingsPct||0),0) / passing.length) : 0;
@@ -647,7 +647,12 @@ function DoneStage({ project, evaluations }) {
               const saved = perEvalSaved(e);
               const dollars = saved !== null && saved > 0 ? saved * perEvalCalls : null;
               return (
-                <tr key={e.id} style={{ borderBottom: i < evals.length - 1 ? "1px solid var(--hairline)" : "none" }}>
+                <tr
+                  key={e.id}
+                  className="row-clickable"
+                  onClick={() => onOpenEval && onOpenEval(e.id)}
+                  style={{ borderBottom: i < evals.length - 1 ? "1px solid var(--hairline)" : "none", cursor: onOpenEval ? "pointer" : "default" }}
+                >
                   <td style={tdStyle}>
                     <div style={{ fontWeight: 500 }}>{e.title}</div>
                     <div className="mono faint" style={{ fontSize: 11 }}>{e.callsite}</div>
@@ -931,4 +936,221 @@ function Documentation() {
   );
 }
 
-Object.assign(window, { Dashboard, RepoDetail, Settings, Documentation });
+/* ----- Per-eval drill-down ----- */
+function ModelOutputCell({ run, role, isLast }) {
+  if (!run) {
+    return (
+      <div style={{
+        padding: 16, color: "var(--ink-faint)", fontSize: 12, fontStyle: "italic",
+        borderRight: isLast ? "none" : "1px solid var(--hairline)",
+      }}>
+        — no run —
+      </div>
+    );
+  }
+  const passed = run.passed === 1;
+  const failed = run.passed === 0;
+  const cost = Number(run.cost_usd) || 0;
+  const costStr = cost > 0 ? "$" + cost.toFixed(5) : "—";
+  return (
+    <div style={{
+      padding: 16,
+      borderRight: isLast ? "none" : "1px solid var(--hairline)",
+      display: "flex", flexDirection: "column", minHeight: 0,
+    }}>
+      <div className="row" style={{ alignItems: "center", marginBottom: 10, fontSize: 11, gap: 8, flexWrap: "wrap" }}>
+        <span className="eyebrow" style={{ fontSize: 10 }}>{role === "current" ? "Current" : "Challenger"}</span>
+        <span className="mono" style={{ fontWeight: 600, color: "var(--ink)" }}>{run.model}</span>
+        <span className="row gap-2 mono" style={{ marginLeft: "auto", color: "var(--ink-faint)", fontSize: 11 }}>
+          <span>{costStr}</span>
+          <span>·</span>
+          <span>{run.latency_ms ?? "—"}ms</span>
+        </span>
+      </div>
+      <div className="mono" style={{
+        fontSize: 12.5, whiteSpace: "pre-wrap", wordBreak: "break-word",
+        lineHeight: 1.55, maxHeight: 280, overflow: "auto",
+        color: "var(--ink)", background: "rgba(15,14,12,0.025)",
+        padding: "10px 12px", borderRadius: 2, flex: 1, minHeight: 60,
+      }}>
+        {run.output || "[empty]"}
+      </div>
+      {(passed || failed) && (
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--hairline)" }}>
+          {passed
+            ? <span className="chip pass" style={{ fontSize: 10, fontWeight: 600 }}><span className="chip-dot" />PASS</span>
+            : <span className="chip" style={{ fontSize: 10, fontWeight: 600, background: "var(--ember)", color: "var(--paper)", borderColor: "transparent" }}>✗ FAIL</span>}
+          {run.judge_reason && (
+            <div style={{ marginTop: 8, fontSize: 12.5, lineHeight: 1.55, color: "var(--ink-muted)" }}>
+              {run.judge_reason}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TestCasePanel({ tc, current, challengers }) {
+  let input = {};
+  try { input = JSON.parse(tc.input_json || '{}'); }
+  catch { input = { raw: tc.input_json }; }
+  const inputDisplay = typeof input.user_message === 'string'
+    ? input.user_message
+    : JSON.stringify(input);
+
+  const cellCount = 1 + challengers.length;
+  return (
+    <div className="card" style={{ padding: 0 }}>
+      <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--hairline)" }}>
+        <div className="row" style={{ alignItems: "baseline", gap: 14 }}>
+          <span className="mono" style={{ fontSize: 11, color: "var(--ink-faint)", fontWeight: 600 }}>
+            #{String(tc.idx + 1).padStart(2, '0')}
+          </span>
+          <div style={{ fontSize: 14, color: "var(--ink)", lineHeight: 1.5, flex: 1 }}>
+            {inputDisplay}
+          </div>
+        </div>
+        {tc.golden_output && (
+          <div className="row" style={{ marginTop: 10, gap: 10, alignItems: "baseline" }}>
+            <span className="eyebrow" style={{ fontSize: 10 }}>Expected</span>
+            <div style={{ fontSize: 12.5, color: "var(--ink-faint)", lineHeight: 1.5, flex: 1, fontStyle: "italic" }}>
+              {tc.golden_output}
+            </div>
+          </div>
+        )}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(${cellCount}, minmax(0, 1fr))` }}>
+        <ModelOutputCell run={current} role="current" isLast={challengers.length === 0} />
+        {challengers.map((c, i) => (
+          <ModelOutputCell key={c.id} run={c} role="challenger" isLast={i === challengers.length - 1} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EvalDetail({ evalId, onBack }) {
+  const [data, setData] = useS_d(null);
+  const [err, setErr] = useS_d(null);
+
+  useE_d(() => {
+    let alive = true;
+    setData(null); setErr(null);
+    api.evaluation(evalId)
+      .then(d => { if (alive) setData(d); })
+      .catch(e => { if (alive) setErr(e.message || 'Failed to load.'); });
+    return () => { alive = false; };
+  }, [evalId]);
+
+  if (err) {
+    return (
+      <div style={{ flex: 1, display: "grid", placeItems: "center", background: "var(--paper)" }}>
+        <div className="card" style={{ padding: 28, maxWidth: 480, textAlign: "center" }}>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>Error</div>
+          <div style={{ fontFamily: "var(--font-display)", fontWeight: 900, fontSize: 22, marginBottom: 10 }}>
+            Couldn't load this evaluation
+          </div>
+          <div className="muted" style={{ fontSize: 13.5, marginBottom: 18 }}>{err}</div>
+          <button className="btn btn-primary" onClick={onBack}>Back to project</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div style={{ flex: 1, display: "grid", placeItems: "center", background: "var(--paper)" }}>
+        <div style={{ opacity: 0.35 }}><Logo size={26} /></div>
+      </div>
+    );
+  }
+
+  const { evaluation: e, project: proj, test_cases: tcs, model_runs: runs } = data;
+  // Group runs by test_case_id. Identify the current-model row by passed === null.
+  const byTc = {};
+  for (const r of runs) {
+    if (!byTc[r.test_case_id]) byTc[r.test_case_id] = { current: null, challengers: [] };
+    if (r.passed === null) byTc[r.test_case_id].current = r;
+    else byTc[r.test_case_id].challengers.push(r);
+  }
+
+  const passed = runs.filter(r => r.passed === 1).length;
+  const failed = runs.filter(r => r.passed === 0).length;
+
+  return (
+    <div style={{ flex: 1, overflow: "auto", background: "var(--paper)" }}>
+      <div style={{
+        position: "sticky", top: 0, zIndex: 5, background: "var(--paper)",
+        borderBottom: "1px solid var(--hairline)", padding: "16px 36px"
+      }}>
+        <div className="row gap-2 mono" style={{ fontSize: 11, color: "var(--ink-faint)", marginBottom: 10 }}>
+          <button className="btn-quiet" style={{ padding: 0 }} onClick={onBack}>Dashboard</button>
+          <Icon name="chevron-r" size={11} />
+          <button className="btn-quiet" style={{ padding: 0 }} onClick={onBack}>{proj.name}</button>
+          <Icon name="chevron-r" size={11} />
+          <span style={{ color: "var(--ink)" }}>{e.title}</span>
+        </div>
+        <div className="row" style={{ alignItems: "flex-end", gap: 24 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h1 className="display" style={{ fontSize: 30, margin: 0, letterSpacing: "-0.03em" }}>{e.title}</h1>
+            <div className="mono faint" style={{ fontSize: 12, marginTop: 6 }}>{e.callsite}</div>
+          </div>
+          <button className="btn btn-ghost" onClick={onBack}>
+            <Icon name="chevron-r" size={13} />Back to project
+          </button>
+        </div>
+        <div className="row gap-3" style={{ marginTop: 18, fontSize: 12, color: "var(--ink-muted)", flexWrap: "wrap" }}>
+          <div className="row gap-2">
+            <span className="eyebrow" style={{ fontSize: 10 }}>Current</span>
+            <span className="mono">{e.currentModel}</span>
+          </div>
+          <span style={{ color: "var(--ink-faint)" }}>→</span>
+          <div className="row gap-2">
+            <span className="eyebrow" style={{ fontSize: 10 }}>Winner</span>
+            <span className="mono" style={{ color: "var(--ember-deep)", fontWeight: 500 }}>{e.winner || "—"}</span>
+          </div>
+          <span style={{ color: "var(--ink-faint)" }}>·</span>
+          <div className="row gap-2">
+            <span className="eyebrow" style={{ fontSize: 10 }}>Pass rate</span>
+            <span style={{ fontFamily: "var(--font-display)", fontWeight: 900 }}>{e.passRate ?? "—"}%</span>
+          </div>
+          <span style={{ color: "var(--ink-faint)" }}>·</span>
+          <div className="row gap-2">
+            <span className="eyebrow" style={{ fontSize: 10 }}>Savings</span>
+            <span style={{ fontFamily: "var(--font-display)", fontWeight: 900, color: "var(--ember)" }}>−{e.savingsPct ?? 0}%</span>
+          </div>
+          <span style={{ color: "var(--ink-faint)" }}>·</span>
+          <div className="row gap-2">
+            <span className="eyebrow" style={{ fontSize: 10 }}>Cases</span>
+            <span style={{ fontFamily: "var(--font-display)", fontWeight: 900 }}>{tcs.length}</span>
+            <span className="muted" style={{ fontSize: 11 }}>
+              ({passed} pass · {failed} fail)
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ padding: "28px 36px 60px", display: "flex", flexDirection: "column", gap: 18 }}>
+        {tcs.length === 0 && (
+          <div className="card" style={{ padding: 28, textAlign: "center" }}>
+            <div className="muted">No test cases on this evaluation.</div>
+          </div>
+        )}
+        {tcs.map(tc => {
+          const group = byTc[tc.id] || { current: null, challengers: [] };
+          return (
+            <TestCasePanel
+              key={tc.id}
+              tc={tc}
+              current={group.current}
+              challengers={group.challengers}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+Object.assign(window, { Dashboard, RepoDetail, EvalDetail, Settings, Documentation });

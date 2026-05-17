@@ -8,6 +8,7 @@ function App() {
   const [ghAccount, setGhAccount] = useS(null);
   const [projects, setProjects] = useS([]);
   const [openId, setOpenId] = useS(null);
+  const [openEvalId, setOpenEvalId] = useS(null);
 
   useE(() => {
     (async () => {
@@ -58,6 +59,7 @@ function App() {
     setRoute("auth");
   };
   const openProject = (id) => { setOpenId(id); setRoute("detail"); };
+  const openEval = (id) => { setOpenEvalId(id); setRoute("eval"); };
 
   if (route === "loading") {
     return (
@@ -89,7 +91,10 @@ function App() {
         />
       )}
       {route === "detail" && openId && (
-        <RepoDetail projectId={openId} onBack={() => setRoute("dashboard")} />
+        <RepoDetail projectId={openId} onBack={() => setRoute("dashboard")} onOpenEval={openEval} />
+      )}
+      {route === "eval" && openEvalId && (
+        <EvalDetail evalId={openEvalId} onBack={() => setRoute("detail")} />
       )}
       {route === "settings" && (
         <Settings user={user} onUserUpdate={setUser} onLogout={handleLogout} />

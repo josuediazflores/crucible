@@ -164,6 +164,27 @@ app.get('/api/projects/:id', requireAuth, (req, res) => {
   });
 });
 
+app.get('/api/evaluations/:id', requireAuth, (req, res) => {
+  const evalId = req.params.id;
+  const e = db.prepare('SELECT * FROM evaluations WHERE id = ?').get(evalId);
+  if (!e) return res.status(404).json({ error: 'Not found' });
+  // Ownership: the evaluation's project must belong to req.user.
+  const proj = db.prepare('SELECT * FROM projects WHERE id = ?').get(e.project_id);
+  if (!proj || proj.user_id !== req.user.id) return res.status(404).json({ error: 'Not found' });
+  const test_cases = db.prepare(
+    'SELECT id, idx, input_json, golden_output FROM test_cases WHERE evaluation_id = ? ORDER BY idx'
+  ).all(evalId);
+  const model_runs = db.prepare(
+    'SELECT id, test_case_id, model, output, passed, tokens, cost_usd, latency_ms, judge_reason, ts FROM model_runs WHERE evaluation_id = ? ORDER BY test_case_id, id'
+  ).all(evalId);
+  res.json({
+    evaluation: rowToEval(e),
+    project: { id: proj.id, name: proj.name, owner: proj.owner, fullName: proj.full_name },
+    test_cases,
+    model_runs,
+  });
+});
+
 app.post('/api/projects/:id/rescan', requireAuth, (req, res) => {
   const p = getProject(req.user.id, req.params.id);
   if (!p) return res.status(404).json({ error: 'Not found' });
